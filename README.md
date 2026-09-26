@@ -4,13 +4,13 @@ A functional database library for PHP inspired by Scala's Slick.
 
 ## Overview
 
-Phetch provides a type-safe, composable way to interact with databases using functional programming principles. Built on top of Phunkie Effect and Streams, it offers:
+Phetch describes database work as values. Every operation is a `Query`, a function from a `Connection` to an `IO` from [phunkie/effect](https://github.com/phunkie/effect). Nothing runs until you bind a connection and run the effect, so queries compose with `map` and `flatMap` like any other value and slot straight into an [http4p](https://github.com/phunkie/http4p) handler.
 
-- **Type-safe queries** - Compile-time query validation
-- **Pure functions** - All operations as pure functions returning IO effects
-- **Composable operations** - Build complex queries from simple parts
-- **Lazy evaluation** - Queries are only executed when needed
-- **Stream-based results** - Handle large result sets efficiently
+- **Plain readonly models** hydrated by constructor parameter, with `#[Table]` and `#[Column]` where names differ
+- **Pure functions** for the CRUD cases and a composable builder for the rest
+- **Identifiers validated and quoted** per driver, values always bound as parameters
+- **Streaming** of large result sets through [phunkie/streams](https://github.com/phunkie/streams)
+- **Migrations** with a small CLI
 
 ## Installation
 
@@ -18,274 +18,298 @@ Phetch provides a type-safe, composable way to interact with databases using fun
 composer require phunkie/phetch
 ```
 
-## Requirements
-
-- PHP 8.2 || 8.3 || 8.4
-- phunkie/phunkie ^1.0
-- phunkie/effect ^1.2
-- phunkie/streams ^1.0
+Requires PHP 8.2 or later with the PDO driver for your database, and phunkie/phunkie ^1.5, phunkie/effect ^1.3, phunkie/streams ^1.2.
 
 ## Quick Start
 
 ```php
-use function Phunkie\Phetch\Functions\{find, create, where};
-use function Phunkie\Http4p\Response\{Ok, NotFound};
+use Phunkie\Phetch\Attributes\Table;
+use Phunkie\Types\Option;
 
-// Define your model (plain readonly data)
+use function Phunkie\Phetch\Functions\{connect, create, find};
+
 #[Table('users')]
-final readonly class User {
+final readonly class User
+{
     public function __construct(
         public int $id,
         public string $name,
         public string $email,
-    ) {}
+    ) {
+    }
 }
 
-// Connection setup
+$conn = connect('sqlite:app.sqlite')->unsafeRun();
+
+$user = create(User::class, ['name' => 'Ada', 'email' => 'ada@example.com'])
+    ->run($conn)
+    ->unsafeRun();                                        // User
+
+$maybe = find(User::class, $user->id)->run($conn)->unsafeRun(); // Option<User>
+```
+
+## Models
+
+A model is any class whose constructor parameters match the row. Rows are mapped to parameters by name, so a `readonly` class with promoted constructor properties is all you need.
+
+- `#[Table('users')]` names the table. Without it, the lowercased short class name plus `s` is used.
+- `#[Table('accounts', primaryKey: 'account_id')]` names the primary key. The default is `id`.
+- A parameter named `publishedYear` is fed from a `publishedYear` column if there is one, otherwise from `published_year`.
+- `#[Column('author_id')]` on a parameter maps it explicitly.
+
+```php
+use Phunkie\Phetch\Attributes\Column;
+use Phunkie\Phetch\Attributes\Table;
+
+#[Table('books')]
+final readonly class Book
+{
+    public function __construct(
+        public int $id,
+        #[Column('author_id')] public int $writer,
+        public string $title,
+        public int $publishedYear,
+    ) {
+    }
+}
+```
+
+The arrays you pass to `create` and `update` use column names.
+
+## Connections
+
+```php
 use function Phunkie\Phetch\Functions\connect;
-$conn = connect('sqlite:...')->unsafeRun();
 
-// Find by ID - returns Query<Option<User>>
-find(User::class, 1)
-    ->flatMap(fn($opt) => $opt->match(
-        Some: fn($u) => Ok($u),
-        None: fn() => NotFound()
-    ))
-    ->run($conn); // returns IO<Response>
-
-// Create - returns Query<User>
-create(User::class, ['name' => 'John', 'email' => 'john@example.com'])
-    ->map(fn($user) => Ok($user));
-
-// Query - returns Query<ImmList<User>>
-where(User::class, 'active', true)
-    ->orderBy('name')
-    ->limit(10)
-    ->get()
-    ->map(fn($users) => Ok($users));
+connect(string $dsn, ?string $username = null, ?string $password = null, array $options = []); // IO<Connection>
 ```
 
-## Features
+The connection wraps a PDO handle in exception mode with associative fetches. Keep it and pass it to `run()`.
 
-### Pure Function API
+## Queries
 
-All database operations are pure functions returning Query effects (ReaderT):
+A `Query<A>` is a function `Connection -> IO<A>`. Bind the connection with `run()`, then run the `IO`:
 
 ```php
-use function Phunkie\Phetch\Functions\{find, findBy, create, update, delete, where, all};
-
-// Find by primary key - Query<Option<User>>
-find(User::class, 1);
-
-// Find by attribute - Query<Option<User>>
-findBy(User::class, 'email', 'john@example.com');
-
-// Get all - Query<ImmList<User>>
-all(User::class);
-
-// Create - Query<User>
-create(User::class, ['name' => 'John', 'email' => 'john@example.com']);
-
-// Update - Query<Option<User>>
-update(User::class, 1, ['name' => 'Jane']);
-
-// Delete - Query<bool>
-delete(User::class, 1);
+find(User::class, 1)->run($conn)->unsafeRun();
 ```
 
-### Composable Queries
-
-Build queries functionally:
+Queries compose with `map` and `flatMap`. `Query::pure` lifts a plain value and `Query::liftIO` lifts an effect, so a chain can branch into values or effects that need no connection and still end as one `Query`:
 
 ```php
-// Query builder - returns Query<User>
-$activeUsers = where(User::class, 'active', true)
-    ->orderBy('name');
+use Phunkie\Phetch\Query;
 
-// Compose queries
-$recentActiveUsers = $activeUsers
-    ->where('created_at', '>', now()->subDays(7))
-    ->limit(10)
-    ->get();  // Query<ImmList<User>>
+$greeting = find(User::class, 1)->flatMap(fn(Option $user) => $user->isDefined()
+    ? Query::pure('Hello ' . $user->get()->name)
+    : Query::liftIO(io(fn() => 'Hello stranger')));
+
+$greeting->run($conn); // IO<string>
 ```
 
-### Relationships
-
-Define relationships as pure functions:
+## CRUD Functions
 
 ```php
-// Define relationship function
-function userPosts(int $userId): Query {
-    return where(Post::class, 'user_id', $userId)
-        ->orderBy('created_at', 'desc')
-        ->get();
+use function Phunkie\Phetch\Functions\{find, findBy, all, create, update, remove, where};
+
+find(User::class, 1);                                       // Query<Option<User>>
+findBy(User::class, 'email', 'ada@example.com');            // Query<Option<User>>
+all(User::class);                                           // Query<ImmList<User>>, also a builder
+create(User::class, ['name' => 'Ada', 'email' => '...']);   // Query<User>
+update(User::class, 1, ['name' => 'Ada Lovelace']);         // Query<Option<User>>, None when the id is unknown
+remove(User::class, 1);                                     // Query<bool>, true when a row was deleted
+where(User::class, 'active', true);                         // a builder, see below
+```
+
+Table and column names must be identifiers (`[A-Za-z_][A-Za-z0-9_]*`) and are quoted for the driver. Anything else, including an empty array for `update`, throws `InvalidArgumentException` when the query is built, before any IO runs. Values are always bound as prepared-statement parameters.
+
+## Query Builder
+
+`where()` and `all()` return a builder. Each call returns a new builder, so partial queries can be shared.
+
+```php
+$adults = where(User::class, 'age', '>=', 18)->orderBy('name');
+
+$adults->get();                                   // Query<ImmList<User>>
+$adults->first();                                 // Query<Option<User>>
+$adults->count();                                 // Query<int>
+$adults->limit(20)->offset(40)->get();            // page three
+$adults->where('active', true)->get();            // criteria combine with AND
+$adults->stream();                                // Query<Stream<User>>
+```
+
+- `where($column, $value)` or `where($column, $operator, $value)` with one of `=`, `!=`, `<>`, `<`, `<=`, `>`, `>=`, `LIKE`, `NOT LIKE`, `IS`, `IS NOT`
+- `orderBy($column, 'ASC' | 'DESC')`
+- `limit($n)` and `offset($n)`; an offset needs a limit
+
+A builder is itself a `Query<ImmList<T>>`, so `all(User::class)->run($conn)` fetches every row without calling `get()`.
+
+## Relationships
+
+There is no relationship layer. A relationship is a function that returns a query:
+
+```php
+function booksOf(User $author): Query
+{
+    return where(Book::class, 'author_id', $author->id)->orderBy('published_year')->get();
 }
 
-// Use in queries
-find(User::class, 1)
-    ->flatMap(fn($opt) => $opt->match(
-        Some: fn($u) => userPosts($u->id)->map(fn($posts) => Ok($posts)),
-        None: fn() => NotFound()
-    ));
+find(User::class, 1)->flatMap(fn(Option $author) => $author->isDefined()
+    ? booksOf($author->get())
+    : Query::pure(ImmList()));
 ```
 
-### Streaming Large Results
+## Streaming
 
-Handle large datasets with constant memory usage:
+`stream()` yields the rows through a [phunkie/streams](https://github.com/phunkie/streams) `Stream`, hydrating each row as it is pulled:
 
 ```php
-use function Phunkie\Streams\Stream;
+$names = where(User::class, 'active', true)->stream()
+    ->run($conn)
+    ->unsafeRun()                                   // Stream<User>
+    ->map(fn(User $user) => $user->name)
+    ->compile()
+    ->toList();
 
-// Stream query results - Stream<IO, User>
-where(User::class, 'active', true)
-    ->stream()
-    ->map(fn($user) => json_encode($user) . "\n")
-    ->through(utf8Encode)  // Stream<IO, Byte>
+where(User::class, 'active', true)->stream()
+    ->run($conn)
+    ->unsafeRun()
+    ->evalTap(fn(User $user) => io(fn() => print($user->email . "\n")))
     ->compile()
     ->drain()
     ->unsafeRun();
-
-// Use in HTTP responses
-GET('/users/export', fn() =>
-    Ok(
-        where(User::class, 'active', true)
-            ->stream()
-            ->map(fn($u) => json_encode($u))
-            ->intersperse("\n")
-            ->through(utf8Encode)
-    )
-);
 ```
 
-### Sequential Composition
+A stream can be an HTTP body. See the http4p section.
 
-Chain dependent operations:
+## Effects Around Queries
+
+Anything that returns an `IO` joins a query chain through `Query::liftIO`. To run something after a write without waiting for it, fork it with `start()`:
 
 ```php
-function sendWelcomeEmail(User $user): IO {
-    return io(fn() => mail($user->email, 'Welcome!', '...'));
+function sendWelcomeEmail(User $user): IO
+{
+    return io(fn() => mail($user->email, 'Welcome', '...'));
 }
 
-// Create user then send email (sequential - blocks until email sent)
 create(User::class, $data)
-    ->flatMap(fn($user) =>
-        sendWelcomeEmail($user)
-            ->map(fn($_) => Created($user))
-    );
+    ->flatMap(fn(User $user) => Query::liftIO(sendWelcomeEmail($user)->map(fn() => $user)));       // waits
+
+create(User::class, $data)
+    ->flatMap(fn(User $user) => Query::liftIO(sendWelcomeEmail($user)->start()->map(fn() => $user))); // forks
 ```
 
-### Fire and Forget (Async)
+## Migrations
 
-Start background work without blocking the response:
+Create `phetch.php` in the project root:
 
 ```php
-// Create user and send email asynchronously
-create(User::class, $data)
-    ->flatMap(fn($user) =>
-        sendWelcomeEmail($user)
-            ->start()  // Returns IO<AsyncHandle<Unit>> - forks to background fiber
-            ->map(fn($_) => Created($user))  // Response sent immediately
-    );
+<?php
 
-// Or explicitly discard the handle
-create(User::class, $data)
-    ->flatMap(fn($user) =>
-        sendWelcomeEmail($user)->start()->productR(Created($user))
-    );
-
-// Custom execution context
-use Phunkie\Effect\Concurrent\ParallelExecutionContext;
-
-sendEmail($user)
-    ->start(new ParallelExecutionContext())  // Use parallel threads if available
-    ->map(fn($_) => Ok('Email queued'));
+return [
+    'dsn' => 'sqlite:' . __DIR__ . '/database/app.sqlite',
+    'migrations' => __DIR__ . '/database/migrations',
+];
 ```
 
-### Parallel Queries
+| Command | Effect |
+|---------|--------|
+| `vendor/bin/phetch make:migration CreateUsers` | Writes `database/migrations/<timestamp>_CreateUsers.php` |
+| `vendor/bin/phetch migrate` | Runs pending migrations, each in its own transaction |
+| `vendor/bin/phetch rollback` | Rolls back the last batch |
+| `vendor/bin/phetch migrate:status` | Lists every migration and the batch it ran in |
+| `vendor/bin/phetch migrate:init` | Creates the `migrations` table |
 
-Execute multiple queries concurrently:
+A migration is a class named after the file without its timestamp, returning a `Query` from `up()` and `down()`:
 
 ```php
-use function Phunkie\Effect\Functions\parallel;
+use Phunkie\Phetch\Migration\Migration;
+use Phunkie\Phetch\Query;
 
-// Fetch multiple users in parallel
-parallel([
-    find(User::class, 1),
-    find(User::class, 2),
-    find(User::class, 3)
-])->map(fn($users) => Ok($users));
+use function Phunkie\Effect\Functions\io\io;
 
-// Parallel different queries
-parallel([
-    'users' => all(User::class),
-    'posts' => all(Post::class)
-])->map(fn($results) => Ok($results));
+class CreateUsers implements Migration
+{
+    public function up(): Query
+    {
+        return new Query(fn($conn) => io(fn() => $conn->pdo()->exec(
+            'CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE)'
+        )));
+    }
+
+    public function down(): Query
+    {
+        return new Query(fn($conn) => io(fn() => $conn->pdo()->exec('DROP TABLE users')));
+    }
+}
 ```
 
-### Integration with Http4p
+See [docs/migrations](docs/migrations/getting-started.md) for details.
 
-Build APIs with minimal boilerplate:
+## Integration with Http4p
+
+Http4p handlers return `IO<Response>`. Compose the query, lift the response constructors with `Query::liftIO`, and bind the connection at the end with `run($conn)`:
 
 ```php
-use function Phunkie\Http4p\Functions\{HttpRoutes, GET, POST, PUT, DELETE};
-use function Phunkie\Http4p\Response\{Ok, Created, NotFound, NoContent};
-use function Phunkie\Phetch\Functions\{find, create, update, delete, where, all};
+use Phunkie\Http4p\Request;
+use Phunkie\Phetch\Query;
+use Phunkie\Types\Option;
+
+use function Phunkie\Http4p\Functions\{decode, HttpRoutes};
+use function Phunkie\Http4p\Functions\response\{Ok, Created, NotFound, NoContent};
+use function Phunkie\Http4p\Functions\routes\{GET, POST, PUT, DELETE};
+use function Phunkie\Phetch\Functions\{all, find, create, update, remove, where};
+
+$found = fn(int $id) => fn(Option $user) => $user->isDefined()
+    ? Query::pure($user->get())
+    : Query::liftIO(NotFound(['error' => sprintf('User %d not found', $id)]));
 
 $routes = HttpRoutes(
-    // List all users
     GET('/users', fn() =>
-        all(User::class)->map(fn($users) => Ok($users))
+        all(User::class)->flatMap(fn($users) => Query::liftIO(Ok($users)))->run($conn)
     ),
-    
-    // Get user by ID
+
     GET('/users/:id', fn(int $id) =>
-        find(User::class, $id)->flatMap(fn($opt) => $opt->match(
-            Some: fn($u) => Ok($u),
-            None: fn() => NotFound(['error' => 'User not found'])
-        ))
+        find(User::class, $id)->flatMap($found($id))->flatMap(fn($user) => Query::liftIO(Ok($user)))->run($conn)
     ),
-    
-    // Create user and send email asynchronously
+
     POST('/users', fn(Request $req) =>
-        create(User::class, $req->body)
-            ->flatMap(fn($user) =>
-                sendWelcomeEmail($user)
-                    ->start()  // Fork email to background
-                    ->map(fn($_) => Created($user))  // Return immediately
-            )
+        decode($req)->flatMap(fn(array $data) =>
+            create(User::class, $data)->flatMap(fn($user) => Query::liftIO(Created($user)))->run($conn)
+        )
     ),
-    
-    // Update user
+
     PUT('/users/:id', fn(int $id, Request $req) =>
-        update(User::class, $id, $req->body)->flatMap(fn($opt) => $opt->match(
-            Some: fn($u) => Ok($u),
-            None: fn() => NotFound()
-        ))
+        decode($req)->flatMap(fn(array $data) =>
+            update(User::class, $id, $data)->flatMap($found($id))->flatMap(fn($user) => Query::liftIO(Ok($user)))->run($conn)
+        )
     ),
-    
-    // Delete user
+
     DELETE('/users/:id', fn(int $id) =>
-        delete(User::class, $id)->map(fn($ok) => $ok ? NoContent() : NotFound())
+        remove(User::class, $id)->flatMap(fn(bool $deleted) => Query::liftIO($deleted ? NoContent() : NotFound()))->run($conn)
     ),
-    
-    // Get user's posts
-    GET('/users/:id/posts', fn(int $id) =>
-        find(User::class, $id)->flatMap(fn($opt) => $opt->match(
-            Some: fn($u) => userPosts($u->id)->map(fn($posts) => Ok($posts)),
-            None: fn() => NotFound()
-        ))
-    ),
-    
-    // Stream export
+
     GET('/users/export', fn() =>
-        Ok(where(User::class, 'active', true)->stream())
-    )
+        where(User::class, 'active', true)->stream()
+            ->flatMap(fn($users) => Query::liftIO(Ok($users->map(fn(User $user) => json_encode($user) . "\n"))))
+            ->run($conn)
+    ),
 );
+```
+
+`ImmList`, `ImmMap`, `ImmSet` and tuples are `JsonSerializable` from phunkie 1.5, so query results can be handed to the response constructors directly. Never pass request data straight into `create` or `update`: pick the columns you accept first.
+
+## Testing
+
+Run the real code against an in-memory SQLite database migrated by your own migration files:
+
+```php
+$conn = connect('sqlite::memory:')->unsafeRun();
+(new Migrator(__DIR__ . '/../database/migrations'))->run()->run($conn)->unsafeRun();
 ```
 
 ## Documentation
 
-See [docs/index.md](docs/index.md) for complete documentation.
+- [Migrations](docs/index.md)
 
 ## License
 
