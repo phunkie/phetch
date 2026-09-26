@@ -6,11 +6,12 @@ use PHPUnit\Framework\TestCase;
 use Phunkie\Phetch\Attributes\Table;
 use Phunkie\Phetch\Connection\Connection;
 
+use InvalidArgumentException;
 use Phunkie\Phetch\Query;
 use Phunkie\Types\Option;
 
 use function Phunkie\Effect\Functions\io\io;
-use function Phunkie\Phetch\Functions\{connect, find, create, where, all, remove};
+use function Phunkie\Phetch\Functions\{connect, find, findBy, create, update, where, all, remove};
 
 #[Table('users')]
 readonly class User {
@@ -19,6 +20,20 @@ readonly class User {
         public string $name,
         public string $email
     ) {}
+}
+
+#[Table('teams')]
+readonly class Team {
+    public function __construct(
+        public int $id,
+        public string $name,
+        public string $group
+    ) {}
+}
+
+#[Table('users; DROP TABLE users')]
+readonly class Hostile {
+    public function __construct(public int $id) {}
 }
 
 class QueryTest extends TestCase
@@ -35,6 +50,40 @@ class QueryTest extends TestCase
         
         $pdo = $this->conn->pdo();
         $pdo->exec("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)");
+        $pdo->exec('CREATE TABLE teams (id INTEGER PRIMARY KEY, name TEXT, "group" TEXT)');
+    }
+
+    public function test_reserved_words_work_as_column_names_everywhere()
+    {
+        $team = create(Team::class, ['name' => 'Core', 'group' => 'admins'])->run($this->conn)->unsafeRun();
+        $this->assertEquals('admins', $team->group);
+
+        $updated = update(Team::class, $team->id, ['group' => 'ops'])->run($this->conn)->unsafeRun()->get();
+        $this->assertEquals('ops', $updated->group);
+
+        $this->assertEquals('Core', findBy(Team::class, 'group', 'ops')->run($this->conn)->unsafeRun()->get()->name);
+        $this->assertEquals(1, where(Team::class, 'group', 'ops')->orderBy('group')->get()->run($this->conn)->unsafeRun()->length);
+    }
+
+    public function test_update_with_no_data_is_rejected_before_touching_the_database()
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        update(User::class, 1, []);
+    }
+
+    public function test_table_names_that_are_not_identifiers_are_rejected()
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        find(Hostile::class, 1);
+    }
+
+    public function test_column_names_that_are_not_identifiers_are_rejected()
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        create(User::class, ['name) VALUES (1); DROP TABLE users; --' => 'x']);
     }
 
     public function test_find_returns_none_when_not_found()
