@@ -16,8 +16,10 @@ $cmd = $argv[1] ?? 'help';
 if ($cmd === 'help') {
     echo "Usage: bin/phetch <command>\n";
     echo "Commands:\n";
-    echo "  migrate           Run migrations\n";
-    echo "  rollback          Rollback last batch\n";
+    echo "  migrate           Run pending migrations\n";
+    echo "  migrate:status    List migrations and the batch each one ran in\n";
+    echo "  migrate:init      Create the migrations table\n";
+    echo "  rollback          Roll back the last batch\n";
     echo "  make:migration    Create a new migration file\n";
     exit(0);
 }
@@ -52,10 +54,6 @@ if (!is_dir($migrationPath)) {
 
 $migrator = new Migrator($migrationPath);
 
-// Commands that don't need DB connection (except init?)
-// actually make:migration doesn't need DB technically, but migrator might use it?
-// My make() implementation uses IO but not connection.
-
 if ($cmd === 'make:migration') {
     $name = $argv[2] ?? null;
     if (!$name) {
@@ -78,9 +76,14 @@ try {
             $migrator->rollback()->run($conn)->unsafeRun();
             break;
         case 'migrate:init':
-             $migrator->init()->run($conn)->unsafeRun();
-             echo "Migrations table initialized.\n";
-             break;
+            $migrator->init()->run($conn)->unsafeRun();
+            echo "Migrations table initialized.\n";
+            break;
+        case 'migrate:status':
+            foreach ($migrator->status()->run($conn)->unsafeRun()->toArray() as $status) {
+                printf("%-8s %-6s %s\n", $status->ran() ? 'Ran' : 'Pending', $status->batch ?? '', $status->name);
+            }
+            break;
         default:
             echo "Unknown command: $cmd\n";
             exit(1);
