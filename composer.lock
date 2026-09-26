@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "52433a3d39c05a1c1e8c26d5b67abfb2",
+    "content-hash": "8fc01b651eb1714d62dc4927963b91aa",
     "packages": [
         {
             "name": "phunkie/effect",
