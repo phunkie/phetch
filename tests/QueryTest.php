@@ -178,6 +178,17 @@ class QueryTest extends TestCase
         $this->assertSame(1, all(Membership::class)->count()->run($this->conn)->unsafeRun());
     }
 
+    public function test_traverse_runs_one_query_per_value_in_order_and_collects_the_results()
+    {
+        $created = Query::traverse(['A', 'B', 'C'], fn(string $name) => create(User::class, ['name' => $name, 'email' => strtolower($name) . '@a.com']))
+            ->run($this->conn)
+            ->unsafeRun();
+
+        $this->assertEquals(ImmList('A', 'B', 'C'), $created->map(fn(User $user) => $user->name));
+        $this->assertEquals(ImmList(1, 2, 3), $created->map(fn(User $user) => $user->id));
+        $this->assertEquals(ImmList(), Query::traverse([], fn($x) => Query::pure($x))->run($this->conn)->unsafeRun());
+    }
+
     public function test_a_transaction_rolls_back_everything_when_a_step_fails()
     {
         $work = create(User::class, ['name' => 'A', 'email' => 'a@a.com'])

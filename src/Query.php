@@ -5,6 +5,8 @@ namespace Phunkie\Phetch;
 use Phunkie\Cats\Kleisli;
 use Phunkie\Effect\IO\IO;
 use Phunkie\Phetch\Connection\Connection;
+use Phunkie\Types\ImmList;
+use function ImmList;
 use function Phunkie\Effect\Functions\io\io;
 
 /**
@@ -43,6 +45,25 @@ class Query extends Kleisli
     public static function liftIO(IO $io): Query
     {
         return new Query(fn(Connection $c) => $io);
+    }
+
+    /**
+     * One query per value, run in order, with the results collected in a list.
+     *
+     * @template B
+     * @template C
+     * @param iterable<B> $values
+     * @param callable(B): Query<C> $f
+     * @return Query<ImmList<C>>
+     */
+    public static function traverse(iterable $values, callable $f): Query
+    {
+        $collected = self::pure([]);
+        foreach ($values as $value) {
+            $collected = $collected->flatMap(fn(array $done) => $f($value)->map(fn($result) => [...$done, $result]));
+        }
+
+        return $collected->map(fn(array $results) => ImmList(...$results));
     }
 
     /**
