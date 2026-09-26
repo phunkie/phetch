@@ -359,7 +359,17 @@ $conn = connect('sqlite::memory:')->unsafeRun();
 
 ## Documentation
 
-- [Migrations](docs/index.md)
+Full documentation is in [docs/](docs/index.md).
+
+- [Quick Start](docs/getting-started/quick-start.md)
+- [Models](docs/core/models.md) and [Queries](docs/core/queries.md)
+- [CRUD Operations](docs/crud/operations.md) and the [Query Builder](docs/querying/builder.md)
+- [Relationships](docs/querying/relationships.md)
+- [Errors and Transactions](docs/core/errors-and-transactions.md)
+- [Streaming](docs/streaming/queries.md)
+- [Http4p Integration](docs/integration/http4p.md)
+- [Testing](docs/advanced/testing.md)
+- [Migrations](docs/migrations/getting-started.md)
 
 ## License
 
