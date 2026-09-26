@@ -14,6 +14,7 @@ use Phunkie\Types\Option;
 
 use function None;
 use function Phunkie\Effect\Functions\io\io;
+use function Phunkie\Phetch\Functions\execute;
 use function Phunkie\Phetch\Functions\hydrate;
 use function Some;
 use function StreamFromPDO;
@@ -64,6 +65,21 @@ class QueryBuilder extends Query
 
         $new = clone $this;
         $new->criteria[] = [new Identifier($column), $operator, $value];
+
+        return $new;
+    }
+
+    /**
+     * @param list<mixed> $values
+     */
+    public function whereIn(string $column, array $values): static
+    {
+        if ([] === $values) {
+            throw new InvalidArgumentException('whereIn needs at least one value.');
+        }
+
+        $new = clone $this;
+        $new->criteria[] = [new Identifier($column), 'IN', $values];
 
         return $new;
     }
@@ -136,6 +152,16 @@ class QueryBuilder extends Query
     }
 
     /**
+     * Delete the matching rows.
+     *
+     * @return Query<int> the number of rows deleted
+     */
+    public function delete(): Query
+    {
+        return new Query(fn (Connection $conn) => io(fn() => $this->execute($conn, 'DELETE FROM '.$conn->quote($this->table).$this->whereSql($conn))->rowCount()));
+    }
+
+    /**
      * @return Query<Stream> Stream<IO, T> wrapped in Query
      */
     public function stream(): Query
@@ -151,10 +177,12 @@ class QueryBuilder extends Query
 
     private function execute(Connection $conn, string $sql): PDOStatement
     {
-        $stmt = $conn->pdo()->prepare($sql);
-        $stmt->execute(array_map(fn(array $criterion) => $criterion[2], $this->criteria));
+        $params = [];
+        foreach ($this->criteria as [, $operator, $value]) {
+            $params = 'IN' === $operator ? [...$params, ...$value] : [...$params, $value];
+        }
 
-        return $stmt;
+        return execute($conn, $sql, $params);
     }
 
     private function selectSql(Connection $conn): string
@@ -192,7 +220,9 @@ class QueryBuilder extends Query
             return '';
         }
 
-        $clauses = array_map(fn(array $criterion) => sprintf('%s %s ?', $conn->quote($criterion[0]), $criterion[1]), $this->criteria);
+        $clauses = array_map(fn(array $criterion) => 'IN' === $criterion[1]
+            ? sprintf('%s IN (%s)', $conn->quote($criterion[0]), implode(', ', array_fill(0, count($criterion[2]), '?')))
+            : sprintf('%s %s ?', $conn->quote($criterion[0]), $criterion[1]), $this->criteria);
 
         return ' WHERE '.implode(' AND ', $clauses);
     }
