@@ -23,6 +23,7 @@ Requires PHP 8.2 or later with the PDO driver for your database, and phunkie/phu
 ## Quick Start
 
 ```php
+use Phunkie\Phetch\Attributes\Generated;
 use Phunkie\Phetch\Attributes\Table;
 use Phunkie\Types\Option;
 
@@ -32,7 +33,7 @@ use function Phunkie\Phetch\Functions\{connect, create, find};
 final readonly class User
 {
     public function __construct(
-        public int $id,
+        #[Generated] public int $id,
         public string $name,
         public string $email,
     ) {
@@ -56,16 +57,19 @@ A model is any class whose constructor parameters match the row. Rows are mapped
 - `#[Table('accounts', primaryKey: 'account_id')]` names the primary key. The default is `id`.
 - A parameter named `publishedYear` is fed from a `publishedYear` column if there is one, otherwise from `published_year`.
 - `#[Column('author_id')]` on a parameter maps it explicitly.
+- `#[Generated]` marks a parameter whose value the server produces, such as an auto-increment key or a timestamp. Phetch reads it like any other column; http4p's `decode` never expects it from a client.
 
 ```php
 use Phunkie\Phetch\Attributes\Column;
 use Phunkie\Phetch\Attributes\Table;
 
+use Phunkie\Phetch\Attributes\Generated;
+
 #[Table('books')]
 final readonly class Book
 {
     public function __construct(
-        public int $id,
+        #[Generated] public int $id,
         #[Column('author_id')] public int $writer,
         public string $title,
         public int $publishedYear,
@@ -74,7 +78,7 @@ final readonly class Book
 }
 ```
 
-The arrays you pass to `create` and `update` use column names.
+The arrays you pass to `create` and `update` may be keyed by column name or by constructor parameter name; a parameter name is written to its `#[Column]`, or to the snake_case form of the name.
 
 ## Connections
 
@@ -88,22 +92,27 @@ The connection wraps a PDO handle in exception mode with associative fetches. Ke
 
 ## Queries
 
-A `Query<A>` is a function `Connection -> IO<A>`. Bind the connection with `run()`, then run the `IO`:
+A `Query<A>` is a function `Connection -> IO<A>`. Bind the connection with `run()` and compose the rest in `IO`:
 
 ```php
-find(User::class, 1)->run($conn)->unsafeRun();
+find(User::class, 1)->run($conn)                                     // IO<Option<User>>
+    ->flatMap(fn(Option $user) => $user->fold(
+        io(fn() => 'Hello stranger'),
+        fn(User $found) => io(fn() => 'Hello ' . $found->name),
+    ));
 ```
 
-Queries compose with `map` and `flatMap`. `Query::pure` lifts a plain value and `Query::liftIO` lifts an effect, so a chain can branch into values or effects that need no connection and still end as one `Query`:
+Queries also compose among themselves with `map` and `flatMap`, which keeps a chain of database steps as one value until it is run. `Query::pure` lifts a plain value and `Query::liftIO` lifts an effect into such a chain:
 
 ```php
 use Phunkie\Phetch\Query;
 
-$greeting = find(User::class, 1)->flatMap(fn(Option $user) => $user->isDefined()
-    ? Query::pure('Hello ' . $user->get()->name)
-    : Query::liftIO(io(fn() => 'Hello stranger')));
+$authorWithBooks = find(User::class, 1)->flatMap(fn(Option $user) => $user->fold(
+    Query::pure(None()),
+    fn(User $found) => where(Post::class, 'user_id', $found->id)->get()->map(fn($posts) => Some(Pair($found, $posts))),
+));
 
-$greeting->run($conn); // IO<string>
+$authorWithBooks->run($conn); // IO<Option<Pair<User, ImmList<Post>>>>
 ```
 
 ## CRUD Functions
@@ -247,56 +256,77 @@ See [docs/migrations](docs/migrations/getting-started.md) for details.
 
 ## Integration with Http4p
 
-Http4p handlers return `IO<Response>`. Compose the query, lift the response constructors with `Query::liftIO`, and bind the connection at the end with `run($conn)`:
+Http4p handlers return `IO<Response>`. Run the query, then compose the response in `IO`. `decode($req, User::class)` validates the body against the entity's constructor: on `POST` and `PUT` every parameter without a default is required except those marked `#[Generated]`, a `PATCH` may send any subset, unknown and generated fields are dropped, and a bad body is answered with a `400` listing the errors before the handler runs. `Option::fold` picks the response for a missing row. A `routes.php` that receives the connection is all the structure an app needs:
 
 ```php
+<?php
+
 use Phunkie\Http4p\Request;
-use Phunkie\Phetch\Query;
+use Phunkie\Phetch\Connection\Connection;
+use Phunkie\Types\ImmList;
 use Phunkie\Types\Option;
 
-use function Phunkie\Http4p\Functions\{decode, HttpRoutes};
-use function Phunkie\Http4p\Functions\response\{Ok, Created, NotFound, NoContent};
-use function Phunkie\Http4p\Functions\routes\{GET, POST, PUT, DELETE};
-use function Phunkie\Phetch\Functions\{all, find, create, update, remove, where};
+use function Phunkie\Http4p\Functions\decode;
+use function Phunkie\Http4p\Functions\HttpRoutes;
+use function Phunkie\Http4p\Functions\response\{Created, NoContent, NotFound, Ok};
+use function Phunkie\Http4p\Functions\routes\{DELETE, GET, PATCH, POST};
+use function Phunkie\Phetch\Functions\{all, create, find, remove, update, where};
 
-$found = fn(int $id) => fn(Option $user) => $user->isDefined()
-    ? Query::pure($user->get())
-    : Query::liftIO(NotFound(['error' => sprintf('User %d not found', $id)]));
+return function (Connection $conn): ImmList {
+    $notFound = fn(int $id) => NotFound(['error' => sprintf('User %d not found', $id)]);
 
-$routes = HttpRoutes(
-    GET('/users', fn() =>
-        all(User::class)->flatMap(fn($users) => Query::liftIO(Ok($users)))->run($conn)
-    ),
+    return HttpRoutes(
+        GET('/users', fn() =>
+            all(User::class)->run($conn)->flatMap(fn(ImmList $users) => Ok($users))
+        ),
 
-    GET('/users/:id', fn(int $id) =>
-        find(User::class, $id)->flatMap($found($id))->flatMap(fn($user) => Query::liftIO(Ok($user)))->run($conn)
-    ),
+        GET('/users/:id', fn(int $id) =>
+            find(User::class, $id)->run($conn)->flatMap(fn(Option $user) =>
+                $user->fold($notFound($id), fn(User $found) => Ok($found)))
+        ),
 
-    POST('/users', fn(Request $req) =>
-        decode($req)->flatMap(fn(array $data) =>
-            create(User::class, $data)->flatMap(fn($user) => Query::liftIO(Created($user)))->run($conn)
-        )
-    ),
+        POST('/users', fn(Request $req) =>
+            decode($req, User::class)
+                ->flatMap(fn(array $data) => create(User::class, $data)->run($conn))
+                ->flatMap(fn(User $user) => Created($user))
+        ),
 
-    PUT('/users/:id', fn(int $id, Request $req) =>
-        decode($req)->flatMap(fn(array $data) =>
-            update(User::class, $id, $data)->flatMap($found($id))->flatMap(fn($user) => Query::liftIO(Ok($user)))->run($conn)
-        )
-    ),
+        PATCH('/users/:id', fn(int $id, Request $req) =>
+            decode($req, User::class)
+                ->flatMap(fn(array $data) => update(User::class, $id, $data)->run($conn))
+                ->flatMap(fn(Option $user) => $user->fold($notFound($id), fn(User $updated) => Ok($updated)))
+        ),
 
-    DELETE('/users/:id', fn(int $id) =>
-        remove(User::class, $id)->flatMap(fn(bool $deleted) => Query::liftIO($deleted ? NoContent() : NotFound()))->run($conn)
-    ),
+        DELETE('/users/:id', fn(int $id) =>
+            remove(User::class, $id)->run($conn)->flatMap(fn(bool $deleted) => $deleted ? NoContent() : $notFound($id))
+        ),
 
-    GET('/users/export', fn() =>
-        where(User::class, 'active', true)->stream()
-            ->flatMap(fn($users) => Query::liftIO(Ok($users->map(fn(User $user) => json_encode($user) . "\n"))))
-            ->run($conn)
-    ),
-);
+        GET('/users/:id/posts', fn(int $id) =>
+            find(User::class, $id)->run($conn)->flatMap(fn(Option $user) => $user->fold(
+                $notFound($id),
+                fn(User $found) => where(Post::class, 'user_id', $found->id)->orderBy('created_at', 'DESC')->run($conn)
+                    ->flatMap(fn(ImmList $posts) => Ok($posts)),
+            ))
+        ),
+
+        GET('/users/export', fn() =>
+            where(User::class, 'active', true)->stream()->run($conn)
+                ->flatMap(fn($users) => Ok($users->map(fn(User $user) => json_encode($user) . "\n")))
+        ),
+    );
+};
 ```
 
-`ImmList`, `ImmMap`, `ImmSet` and tuples are `JsonSerializable` from phunkie 1.5, so query results can be handed to the response constructors directly. Never pass request data straight into `create` or `update`: pick the columns you accept first.
+```php
+// public/index.php
+$routes = require dirname(__DIR__) . '/routes.php';
+
+connect('sqlite:app.sqlite')
+    ->flatMap(fn(Connection $conn) => (new PhpServer($routes($conn)))->run())
+    ->unsafeRun();
+```
+
+`ImmList`, `ImmMap`, `ImmSet` and tuples are `JsonSerializable` from phunkie 1.5, so query results go straight into the response constructors. The decoded array carries only the entity's own fields, so request data never reaches `create` or `update` unfiltered.
 
 ## Testing
 

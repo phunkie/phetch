@@ -64,7 +64,7 @@ function all(string $model): QueryBuilder
 function create(string $model, array $data): Query
 {
     $table = tableOf($model);
-    $columns = columnsOf($data);
+    $columns = columnsOf($model, $data);
 
     return new Query(function(Connection $conn) use ($model, $table, $columns, $data) {
         return io(function() use ($conn, $model, $table, $columns, $data) {
@@ -104,7 +104,7 @@ function update(string $model, mixed $id, array $data): Query
     }
 
     $table = tableOf($model);
-    $columns = columnsOf($data);
+    $columns = columnsOf($model, $data);
 
     return new Query(function(Connection $conn) use ($model, $table, $columns, $id, $data) {
         return io(function() use ($conn, $model, $table, $columns, $id, $data) {
@@ -164,11 +164,29 @@ function tableAttribute(string $class): ?Table
 }
 
 /**
+ * The columns the keys of $data address: a constructor parameter name maps to its column, anything else is a column name.
+ *
  * @return list<Identifier>
  */
-function columnsOf(array $data): array
+function columnsOf(string $model, array $data): array
 {
-    return array_map(fn($column) => new Identifier((string) $column), array_keys($data));
+    $byParameter = [];
+    $constructor = (new ReflectionClass($model))->getConstructor();
+    foreach ($constructor?->getParameters() ?? [] as $param) {
+        $byParameter[$param->getName()] = columnOf($param);
+    }
+
+    return array_map(fn($key) => new Identifier($byParameter[$key] ?? (string) $key), array_keys($data));
+}
+
+/**
+ * The column a constructor parameter is stored in: its #[Column] name, else the snake_case form of its name.
+ */
+function columnOf(ReflectionParameter $param): string
+{
+    $attributes = $param->getAttributes(Column::class);
+
+    return [] === $attributes ? snakeCase($param->getName()) : $attributes[0]->newInstance()->name;
 }
 
 /**
