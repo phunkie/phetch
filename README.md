@@ -7,9 +7,9 @@ A functional database library for PHP inspired by Scala's Slick.
 Phetch provides a type-safe, composable way to interact with databases using functional programming principles. Built on top of Phunkie Effect and Streams, it offers:
 
 - **Type-safe queries** - Compile-time query validation
+- **Pure functions** - All operations as pure functions returning IO effects
 - **Composable operations** - Build complex queries from simple parts
 - **Lazy evaluation** - Queries are only executed when needed
-- **Effect management** - Database operations as IO effects
 - **Stream-based results** - Handle large result sets efficiently
 
 ## Installation
@@ -20,55 +20,77 @@ composer require phunkie/phetch
 
 ## Requirements
 
-- PHP 8.2 or higher
+- PHP 8.2 || 8.3 || 8.4
 - phunkie/phunkie ^1.0
-- phunkie/effect ^1.0
+- phunkie/effect ^1.2
 - phunkie/streams ^1.0
 
 ## Quick Start
 
 ```php
-use Phunkie\Phetch\Schema;
-use Phunkie\Phetch\Table;
-use function Phunkie\Phetch\Column;
-use function Phunkie\Phetch\Table;
+use function Phunkie\Phetch\Functions\{find, create, where};
+use function Phunkie\Http4p\Response\{Ok, NotFound};
 
-// Define your schema
-function UserTable(): Table {
-    return Table(
-        Column('id', Int, primaryKey: true, autoIncrement: true),
-        Column('name', String, nullable: false),
-        Column('email', String, nullable: false),
-    )->mapTo(User::class);
+// Define your model (plain readonly data)
+#[Table('users')]
+final readonly class User {
+    public function __construct(
+        public int $id,
+        public string $name,
+        public string $email,
+    ) {}
 }
 
-// Query with type safety
-$users = from(UserTable())
-    ->where(fn($u) => $u->email->like('%@example.com'))
-    ->select(fn($u) => [$u->id, $u->name])
-    ->run();
+// Connection setup
+use function Phunkie\Phetch\Functions\connect;
+$conn = connect('sqlite:...')->unsafeRun();
+
+// Find by ID - returns Query<Option<User>>
+find(User::class, 1)
+    ->flatMap(fn($opt) => $opt->match(
+        Some: fn($u) => Ok($u),
+        None: fn() => NotFound()
+    ))
+    ->run($conn); // returns IO<Response>
+
+// Create - returns Query<User>
+create(User::class, ['name' => 'John', 'email' => 'john@example.com'])
+    ->map(fn($user) => Ok($user));
+
+// Query - returns Query<ImmList<User>>
+where(User::class, 'active', true)
+    ->orderBy('name')
+    ->limit(10)
+    ->get()
+    ->map(fn($users) => Ok($users));
 ```
 
 ## Features
 
-### Type-Safe Schema Definition
+### Pure Function API
 
-Define your database schema with full type safety:
+All database operations are pure functions returning Query effects (ReaderT):
 
 ```php
-#[Table('users')]
-#[Schema(static fn() => UserTable(
-    id: Int,
-    name: String,
-    email: String
-))]
-final class User {
-    public function __construct(
-        public int $id,
-        public string $name,
-        public string $email
-    ) {}
-}
+use function Phunkie\Phetch\Functions\{find, findBy, create, update, delete, where, all};
+
+// Find by primary key - Query<Option<User>>
+find(User::class, 1);
+
+// Find by attribute - Query<Option<User>>
+findBy(User::class, 'email', 'john@example.com');
+
+// Get all - Query<ImmList<User>>
+all(User::class);
+
+// Create - Query<User>
+create(User::class, ['name' => 'John', 'email' => 'john@example.com']);
+
+// Update - Query<Option<User>>
+update(User::class, 1, ['name' => 'Jane']);
+
+// Delete - Query<bool>
+delete(User::class, 1);
 ```
 
 ### Composable Queries
@@ -76,35 +98,194 @@ final class User {
 Build queries functionally:
 
 ```php
-$activeUsers = from(UserTable())
-    ->where(fn($u) => $u->active->eq(true))
-    ->orderBy(fn($u) => $u->name->asc());
+// Query builder - returns Query<User>
+$activeUsers = where(User::class, 'active', true)
+    ->orderBy('name');
 
-$recentUsers = $activeUsers
-    ->where(fn($u) => $u->createdAt->gt(now()->subDays(7)));
+// Compose queries
+$recentActiveUsers = $activeUsers
+    ->where('created_at', '>', now()->subDays(7))
+    ->limit(10)
+    ->get();  // Query<ImmList<User>>
 ```
 
-### Effect Integration
+### Relationships
 
-All database operations return IO effects:
+Define relationships as pure functions:
 
 ```php
-$program = from(UserTable())
-    ->where(fn($u) => $u->id->eq(1))
-    ->firstOption()
-    ->flatMap(fn($user) => 
-        $user->match(
-            Some: fn($u) => updateUser($u),
-            None: fn() => io(fn() => null)
-        )
+// Define relationship function
+function userPosts(int $userId): Query {
+    return where(Post::class, 'user_id', $userId)
+        ->orderBy('created_at', 'desc')
+        ->get();
+}
+
+// Use in queries
+find(User::class, 1)
+    ->flatMap(fn($opt) => $opt->match(
+        Some: fn($u) => userPosts($u->id)->map(fn($posts) => Ok($posts)),
+        None: fn() => NotFound()
+    ));
+```
+
+### Streaming Large Results
+
+Handle large datasets with constant memory usage:
+
+```php
+use function Phunkie\Streams\Stream;
+
+// Stream query results - Stream<IO, User>
+where(User::class, 'active', true)
+    ->stream()
+    ->map(fn($user) => json_encode($user) . "\n")
+    ->through(utf8Encode)  // Stream<IO, Byte>
+    ->compile()
+    ->drain()
+    ->unsafeRun();
+
+// Use in HTTP responses
+GET('/users/export', fn() =>
+    Ok(
+        where(User::class, 'active', true)
+            ->stream()
+            ->map(fn($u) => json_encode($u))
+            ->intersperse("\n")
+            ->through(utf8Encode)
+    )
+);
+```
+
+### Sequential Composition
+
+Chain dependent operations:
+
+```php
+function sendWelcomeEmail(User $user): IO {
+    return io(fn() => mail($user->email, 'Welcome!', '...'));
+}
+
+// Create user then send email (sequential - blocks until email sent)
+create(User::class, $data)
+    ->flatMap(fn($user) =>
+        sendWelcomeEmail($user)
+            ->map(fn($_) => Created($user))
+    );
+```
+
+### Fire and Forget (Async)
+
+Start background work without blocking the response:
+
+```php
+// Create user and send email asynchronously
+create(User::class, $data)
+    ->flatMap(fn($user) =>
+        sendWelcomeEmail($user)
+            ->start()  // Returns IO<AsyncHandle<Unit>> - forks to background fiber
+            ->map(fn($_) => Created($user))  // Response sent immediately
     );
 
-$result = $program->unsafeRun();
+// Or explicitly discard the handle
+create(User::class, $data)
+    ->flatMap(fn($user) =>
+        sendWelcomeEmail($user)->start()->productR(Created($user))
+    );
+
+// Custom execution context
+use Phunkie\Effect\Concurrent\ParallelExecutionContext;
+
+sendEmail($user)
+    ->start(new ParallelExecutionContext())  // Use parallel threads if available
+    ->map(fn($_) => Ok('Email queued'));
+```
+
+### Parallel Queries
+
+Execute multiple queries concurrently:
+
+```php
+use function Phunkie\Effect\Functions\parallel;
+
+// Fetch multiple users in parallel
+parallel([
+    find(User::class, 1),
+    find(User::class, 2),
+    find(User::class, 3)
+])->map(fn($users) => Ok($users));
+
+// Parallel different queries
+parallel([
+    'users' => all(User::class),
+    'posts' => all(Post::class)
+])->map(fn($results) => Ok($results));
+```
+
+### Integration with Http4p
+
+Build APIs with minimal boilerplate:
+
+```php
+use function Phunkie\Http4p\Functions\{HttpRoutes, GET, POST, PUT, DELETE};
+use function Phunkie\Http4p\Response\{Ok, Created, NotFound, NoContent};
+use function Phunkie\Phetch\Functions\{find, create, update, delete, where, all};
+
+$routes = HttpRoutes(
+    // List all users
+    GET('/users', fn() =>
+        all(User::class)->map(fn($users) => Ok($users))
+    ),
+    
+    // Get user by ID
+    GET('/users/:id', fn(int $id) =>
+        find(User::class, $id)->flatMap(fn($opt) => $opt->match(
+            Some: fn($u) => Ok($u),
+            None: fn() => NotFound(['error' => 'User not found'])
+        ))
+    ),
+    
+    // Create user and send email asynchronously
+    POST('/users', fn(Request $req) =>
+        create(User::class, $req->body)
+            ->flatMap(fn($user) =>
+                sendWelcomeEmail($user)
+                    ->start()  // Fork email to background
+                    ->map(fn($_) => Created($user))  // Return immediately
+            )
+    ),
+    
+    // Update user
+    PUT('/users/:id', fn(int $id, Request $req) =>
+        update(User::class, $id, $req->body)->flatMap(fn($opt) => $opt->match(
+            Some: fn($u) => Ok($u),
+            None: fn() => NotFound()
+        ))
+    ),
+    
+    // Delete user
+    DELETE('/users/:id', fn(int $id) =>
+        delete(User::class, $id)->map(fn($ok) => $ok ? NoContent() : NotFound())
+    ),
+    
+    // Get user's posts
+    GET('/users/:id/posts', fn(int $id) =>
+        find(User::class, $id)->flatMap(fn($opt) => $opt->match(
+            Some: fn($u) => userPosts($u->id)->map(fn($posts) => Ok($posts)),
+            None: fn() => NotFound()
+        ))
+    ),
+    
+    // Stream export
+    GET('/users/export', fn() =>
+        Ok(where(User::class, 'active', true)->stream())
+    )
+);
 ```
 
 ## Documentation
 
-Coming soon.
+See [docs/index.md](docs/index.md) for complete documentation.
 
 ## License
 

@@ -1,0 +1,91 @@
+#!/usr/bin/env php
+<?php
+
+foreach ([__DIR__ . '/../../../autoload.php', __DIR__ . '/../vendor/autoload.php'] as $file) {
+    if (file_exists($file)) {
+        require $file;
+        break;
+    }
+}
+
+use Phunkie\Phetch\Migration\Migrator;
+use function Phunkie\Phetch\Functions\connect;
+
+$cmd = $argv[1] ?? 'help';
+
+if ($cmd === 'help') {
+    echo "Usage: bin/phetch <command>\n";
+    echo "Commands:\n";
+    echo "  migrate           Run migrations\n";
+    echo "  rollback          Rollback last batch\n";
+    echo "  make:migration    Create a new migration file\n";
+    exit(0);
+}
+
+$configFile = getcwd() . '/phetch.php';
+if (!file_exists($configFile)) {
+    echo "Error: phetch.php configuration file not found in current directory.\n";
+    echo "Please create a phetch.php returning ['dsn' => '...', 'migrations' => 'path/to/migrations']\n";
+    exit(1);
+}
+
+$config = require $configFile;
+$dsn = $config['dsn'] ?? null;
+$username = $config['username'] ?? null;
+$password = $config['password'] ?? null;
+$migrationPath = $config['migrations'] ?? 'database/migrations';
+
+if (!$dsn) {
+    echo "Error: 'dsn' missing in phetch.php\n";
+    exit(1);
+}
+
+// Ensure migration directory exists
+if (!is_dir($migrationPath)) {
+    if ($cmd === 'make:migration') {
+        mkdir($migrationPath, 0777, true);
+    } else {
+        echo "Error: Migration directory $migrationPath does not exist.\n";
+        exit(1);
+    }
+}
+
+$migrator = new Migrator($migrationPath);
+
+// Commands that don't need DB connection (except init?)
+// actually make:migration doesn't need DB technically, but migrator might use it?
+// My make() implementation uses IO but not connection.
+
+if ($cmd === 'make:migration') {
+    $name = $argv[2] ?? null;
+    if (!$name) {
+        echo "Error: Migration name required.\nExample: bin/phetch make:migration CreateUsers\n";
+        exit(1);
+    }
+    $migrator->make($name)->unsafeRun();
+    exit(0);
+}
+
+// Commands needing DB
+$conn = connect($dsn, $username, $password)->unsafeRun();
+
+try {
+    switch ($cmd) {
+        case 'migrate':
+            $migrator->run()->run($conn)->unsafeRun();
+            break;
+        case 'rollback':
+            $migrator->rollback()->run($conn)->unsafeRun();
+            break;
+        case 'migrate:init':
+             $migrator->init()->run($conn)->unsafeRun();
+             echo "Migrations table initialized.\n";
+             break;
+        default:
+            echo "Unknown command: $cmd\n";
+            exit(1);
+    }
+} catch (Throwable $e) {
+    echo "Error: " . $e->getMessage() . "\n";
+    exit(1);
+}
