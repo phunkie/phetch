@@ -26,6 +26,27 @@ class QueryBuilderTest extends TestCase
         $this->builder()->where('age', '>', 18)->orderBy('name', 'desc')->get()->run($conn)->unsafeRun();
     }
 
+    public function test_offset_follows_limit()
+    {
+        $conn = $this->connectionExpecting('sqlite', 'SELECT * FROM "users" ORDER BY "name" ASC LIMIT 10 OFFSET 20', []);
+
+        $this->builder()->orderBy('name')->limit(10)->offset(20)->get()->run($conn)->unsafeRun();
+    }
+
+    public function test_count_generates_a_count_query()
+    {
+        $conn = $this->connectionExpecting('sqlite', 'SELECT COUNT(*) FROM "users" WHERE "age" > ?', [18], fetchColumn: '3');
+
+        $this->assertSame(3, $this->builder()->where('age', '>', 18)->count()->run($conn)->unsafeRun());
+    }
+
+    public function test_first_limits_to_one_row()
+    {
+        $conn = $this->connectionExpecting('sqlite', 'SELECT * FROM "users" WHERE "age" > ? LIMIT 1', [18]);
+
+        $this->assertTrue($this->builder()->where('age', '>', 18)->first()->run($conn)->unsafeRun()->isEmpty());
+    }
+
     public function test_rejects_a_column_name_that_is_not_an_identifier()
     {
         $this->expectException(InvalidArgumentException::class);
@@ -52,7 +73,7 @@ class QueryBuilderTest extends TestCase
         return new QueryBuilder('User', new Identifier('users'));
     }
 
-    private function connectionExpecting(string $driver, string $sql, array $params): Connection
+    private function connectionExpecting(string $driver, string $sql, array $params, mixed $fetchColumn = false): Connection
     {
         $pdo = $this->createMock(PDO::class);
         $stmt = $this->createMock(PDOStatement::class);
@@ -60,6 +81,8 @@ class QueryBuilderTest extends TestCase
         $pdo->expects($this->once())->method('prepare')->with($sql)->willReturn($stmt);
         $stmt->expects($this->once())->method('execute')->with($params);
         $stmt->method('fetchAll')->willReturn([]);
+        $stmt->method('fetch')->willReturn(false);
+        $stmt->method('fetchColumn')->willReturn($fetchColumn);
 
         return new Connection($pdo);
     }

@@ -109,6 +109,21 @@ class QueryTest extends TestCase
         $this->assertEquals(1, where(Team::class, 'group', 'ops')->orderBy('group')->get()->run($this->conn)->unsafeRun()->length);
     }
 
+    public function test_count_first_and_offset_page_through_results()
+    {
+        foreach (['A', 'B', 'C'] as $name) {
+            create(User::class, ['name' => $name, 'email' => strtolower($name) . '@a.com'])->run($this->conn)->unsafeRun();
+        }
+
+        $this->assertSame(3, all(User::class)->count()->run($this->conn)->unsafeRun());
+        $this->assertSame(2, where(User::class, 'name', '!=', 'A')->count()->run($this->conn)->unsafeRun());
+        $this->assertEquals('B', where(User::class, 'name', '!=', 'A')->orderBy('name')->first()->run($this->conn)->unsafeRun()->get()->name);
+        $this->assertTrue(where(User::class, 'name', 'Z')->first()->run($this->conn)->unsafeRun()->isEmpty());
+
+        $page = all(User::class)->orderBy('name')->limit(1)->offset(2)->get()->run($this->conn)->unsafeRun();
+        $this->assertEquals(['C'], $page->map(fn(User $user) => $user->name)->toArray());
+    }
+
     public function test_update_with_no_data_is_rejected_before_touching_the_database()
     {
         $this->expectException(InvalidArgumentException::class);

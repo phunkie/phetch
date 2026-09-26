@@ -50,12 +50,11 @@ function findBy(string $model, string $column, mixed $value): Query
 }
 
 /**
- * Get all records.
- * returns Query<ImmList<T>>
+ * Every record, as a builder that is also a Query<ImmList<T>> when run as it is.
  */
-function all(string $model): Query
+function all(string $model): QueryBuilder
 {
-    return (new QueryBuilder($model, tableOf($model)))->get();
+    return new QueryBuilder($model, tableOf($model));
 }
 
 /**
