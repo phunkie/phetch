@@ -3,6 +3,7 @@
 namespace Tests;
 
 use PHPUnit\Framework\TestCase;
+use Phunkie\Phetch\Attributes\Column;
 use Phunkie\Phetch\Attributes\Table;
 use Phunkie\Phetch\Connection\Connection;
 
@@ -31,6 +32,25 @@ readonly class Team {
     ) {}
 }
 
+#[Table('books')]
+readonly class Book {
+    public function __construct(
+        public int $id,
+        #[Column('author_id')]
+        public int $writer,
+        public string $title,
+        public int $publishedYear
+    ) {}
+}
+
+#[Table('accounts', primaryKey: 'account_id')]
+readonly class Account {
+    public function __construct(
+        public int $account_id,
+        public string $name
+    ) {}
+}
+
 #[Table('users; DROP TABLE users')]
 readonly class Hostile {
     public function __construct(public int $id) {}
@@ -51,6 +71,30 @@ class QueryTest extends TestCase
         $pdo = $this->conn->pdo();
         $pdo->exec("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)");
         $pdo->exec('CREATE TABLE teams (id INTEGER PRIMARY KEY, name TEXT, "group" TEXT)');
+        $pdo->exec('CREATE TABLE books (id INTEGER PRIMARY KEY, author_id INTEGER, title TEXT, published_year INTEGER)');
+        $pdo->exec('CREATE TABLE accounts (account_id INTEGER PRIMARY KEY, name TEXT)');
+    }
+
+    public function test_columns_map_to_parameters_by_attribute_or_by_snake_case()
+    {
+        $book = create(Book::class, ['author_id' => 7, 'title' => 'Notes', 'published_year' => 1843])
+            ->run($this->conn)
+            ->unsafeRun();
+
+        $this->assertSame(7, $book->writer);
+        $this->assertSame(1843, $book->publishedYear);
+        $this->assertEquals($book, find(Book::class, $book->id)->run($this->conn)->unsafeRun()->get());
+    }
+
+    public function test_the_primary_key_column_is_configurable()
+    {
+        $account = create(Account::class, ['name' => 'Ada'])->run($this->conn)->unsafeRun();
+
+        $this->assertSame(1, $account->account_id);
+        $this->assertEquals('Ada', find(Account::class, 1)->run($this->conn)->unsafeRun()->get()->name);
+        $this->assertEquals('Grace', update(Account::class, 1, ['name' => 'Grace'])->run($this->conn)->unsafeRun()->get()->name);
+        $this->assertTrue(remove(Account::class, 1)->run($this->conn)->unsafeRun());
+        $this->assertTrue(find(Account::class, 1)->run($this->conn)->unsafeRun()->isEmpty());
     }
 
     public function test_reserved_words_work_as_column_names_everywhere()

@@ -3,6 +3,7 @@
 namespace Phunkie\Phetch\Functions;
 
 use InvalidArgumentException;
+use Phunkie\Phetch\Attributes\Column;
 use Phunkie\Phetch\Attributes\Table;
 use Phunkie\Phetch\Connection\Connection;
 use Phunkie\Phetch\Identifier;
@@ -10,6 +11,8 @@ use Phunkie\Phetch\Query;
 use Phunkie\Phetch\Query\QueryBuilder;
 use Phunkie\Types\Option;
 use ReflectionClass;
+use ReflectionParameter;
+use RuntimeException;
 
 use function Phunkie\Effect\Functions\io\io;
 use function None;
@@ -108,7 +111,7 @@ function update(string $model, mixed $id, array $data): Query
         return io(function() use ($conn, $model, $table, $columns, $id, $data) {
             $sets = implode(', ', array_map(fn(Identifier $column) => $conn->quote($column).' = ?', $columns));
 
-            $stmt = $conn->pdo()->prepare(sprintf('UPDATE %s SET %s WHERE %s = ?', $conn->quote($table), $sets, $conn->quote(primaryKey())));
+            $stmt = $conn->pdo()->prepare(sprintf('UPDATE %s SET %s WHERE %s = ?', $conn->quote($table), $sets, $conn->quote(primaryKey($model))));
             $stmt->execute([...array_values($data), $id]);
 
             return fetchById($conn, $model, $table, $id);
@@ -124,9 +127,9 @@ function remove(string $model, mixed $id): Query
 {
     $table = tableOf($model);
 
-    return new Query(function(Connection $conn) use ($table, $id) {
-        return io(function() use ($conn, $table, $id) {
-            $stmt = $conn->pdo()->prepare(sprintf('DELETE FROM %s WHERE %s = ?', $conn->quote($table), $conn->quote(primaryKey())));
+    return new Query(function(Connection $conn) use ($model, $table, $id) {
+        return io(function() use ($conn, $model, $table, $id) {
+            $stmt = $conn->pdo()->prepare(sprintf('DELETE FROM %s WHERE %s = ?', $conn->quote($table), $conn->quote(primaryKey($model))));
             $stmt->execute([$id]);
 
             return $stmt->rowCount() > 0;
@@ -138,21 +141,27 @@ function remove(string $model, mixed $id): Query
 
 function tableOf(string $class): Identifier
 {
-    $ref = new ReflectionClass($class);
-    $attr = $ref->getAttributes(Table::class);
+    $table = tableAttribute($class);
 
-    if (empty($attr)) {
+    if (null === $table) {
         $parts = explode('\\', $class);
 
         return new Identifier(strtolower(end($parts)) . 's');
     }
 
-    return new Identifier($attr[0]->newInstance()->name);
+    return new Identifier($table->name);
 }
 
-function primaryKey(): Identifier
+function primaryKey(string $class): Identifier
 {
-    return new Identifier('id');
+    return new Identifier(tableAttribute($class)->primaryKey ?? 'id');
+}
+
+function tableAttribute(string $class): ?Table
+{
+    $attributes = (new ReflectionClass($class))->getAttributes(Table::class);
+
+    return [] === $attributes ? null : $attributes[0]->newInstance();
 }
 
 /**
@@ -168,7 +177,7 @@ function columnsOf(array $data): array
  */
 function fetchById(Connection $conn, string $model, Identifier $table, mixed $id): Option
 {
-    $stmt = $conn->pdo()->prepare(sprintf('SELECT * FROM %s WHERE %s = ?', $conn->quote($table), $conn->quote(primaryKey())));
+    $stmt = $conn->pdo()->prepare(sprintf('SELECT * FROM %s WHERE %s = ?', $conn->quote($table), $conn->quote(primaryKey($model))));
     $stmt->execute([$id]);
     $row = $stmt->fetch();
 
@@ -186,17 +195,45 @@ function hydrate(string $class, array $data): object
 
     $args = [];
     foreach ($constructor->getParameters() as $param) {
-        $name = $param->getName();
-        if (array_key_exists($name, $data)) {
-            $args[] = $data[$name];
-        } else {
-             if ($param->isDefaultValueAvailable()) {
-                 $args[] = $param->getDefaultValue();
-             } else {
-                 throw new \Exception("Missing data for parameter '$name' in class $class");
-             }
+        $column = columnFor($param, $data);
+        if (null !== $column) {
+            $args[] = $data[$column];
+
+            continue;
         }
+
+        if ($param->isDefaultValueAvailable()) {
+            $args[] = $param->getDefaultValue();
+
+            continue;
+        }
+
+        throw new RuntimeException(sprintf('No column for parameter "%s" of "%s"; the row has %s.', $param->getName(), $class, implode(', ', array_keys($data))));
     }
 
     return $ref->newInstanceArgs($args);
+}
+
+/**
+ * The row key feeding a constructor parameter: its #[Column] name, else the parameter name, else its snake_case form.
+ */
+function columnFor(ReflectionParameter $param, array $data): ?string
+{
+    $attributes = $param->getAttributes(Column::class);
+    $candidates = [] === $attributes
+        ? [$param->getName(), snakeCase($param->getName())]
+        : [$attributes[0]->newInstance()->name];
+
+    foreach ($candidates as $candidate) {
+        if (array_key_exists($candidate, $data)) {
+            return $candidate;
+        }
+    }
+
+    return null;
+}
+
+function snakeCase(string $name): string
+{
+    return strtolower(preg_replace('/(?<!^)[A-Z]/', '_$0', $name));
 }
