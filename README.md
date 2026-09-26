@@ -259,9 +259,9 @@ use function Phunkie\Http4p\Functions\response\{Ok, Created, NotFound, NoContent
 use function Phunkie\Http4p\Functions\routes\{GET, POST, PUT, DELETE};
 use function Phunkie\Phetch\Functions\{all, find, create, update, remove, where};
 
-$found = fn(int $id) => fn(Option $user) => $user->isDefined()
-    ? Query::pure($user->get())
-    : Query::liftIO(NotFound(['error' => sprintf('User %d not found', $id)]));
+$author = fn(int $id, callable $onFound) => find(User::class, $id)->flatMap(fn(Option $user) => $user->isDefined()
+    ? $onFound($user->get())
+    : Query::liftIO(NotFound(['error' => sprintf('User %d not found', $id)])));
 
 $routes = HttpRoutes(
     GET('/users', fn() =>
@@ -269,7 +269,7 @@ $routes = HttpRoutes(
     ),
 
     GET('/users/:id', fn(int $id) =>
-        find(User::class, $id)->flatMap($found($id))->flatMap(fn($user) => Query::liftIO(Ok($user)))->run($conn)
+        $author($id, fn(User $user) => Query::liftIO(Ok($user)))->run($conn)
     ),
 
     POST('/users', fn(Request $req) =>
@@ -280,12 +280,19 @@ $routes = HttpRoutes(
 
     PUT('/users/:id', fn(int $id, Request $req) =>
         decode($req)->flatMap(fn(array $data) =>
-            update(User::class, $id, $data)->flatMap($found($id))->flatMap(fn($user) => Query::liftIO(Ok($user)))->run($conn)
+            update(User::class, $id, $data)->flatMap(fn(Option $user) => Query::liftIO($user->isDefined()
+                ? Ok($user->get())
+                : NotFound(['error' => sprintf('User %d not found', $id)])))->run($conn)
         )
     ),
 
     DELETE('/users/:id', fn(int $id) =>
         remove(User::class, $id)->flatMap(fn(bool $deleted) => Query::liftIO($deleted ? NoContent() : NotFound()))->run($conn)
+    ),
+
+    GET('/users/:id/posts', fn(int $id) =>
+        $author($id, fn(User $user) => where(Post::class, 'user_id', $user->id)->orderBy('created_at', 'DESC')
+            ->flatMap(fn($posts) => Query::liftIO(Ok($posts))))->run($conn)
     ),
 
     GET('/users/export', fn() =>
@@ -295,6 +302,8 @@ $routes = HttpRoutes(
     ),
 );
 ```
+
+A branch that misses must produce the whole response itself, as `$author` does; mapping `Ok` over the result afterwards would wrap the `NotFound` response in a 200.
 
 `ImmList`, `ImmMap`, `ImmSet` and tuples are `JsonSerializable` from phunkie 1.5, so query results can be handed to the response constructors directly. Never pass request data straight into `create` or `update`: pick the columns you accept first.
 
