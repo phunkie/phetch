@@ -67,6 +67,19 @@ class Query extends Kleisli
     }
 
     /**
+     * This query and then the given ones, in order, with every result combined by $f.
+     *
+     * @template B
+     * @param list<Query<mixed>> $queries
+     * @param callable(mixed ...$results): B $f
+     * @return Query<B>
+     */
+    public function mapN(array $queries, callable $f): Query
+    {
+        return new Query(fn(Connection $c) => $this->run($c)->mapN(array_map(fn(Query $query) => $query->run($c), $queries), $f));
+    }
+
+    /**
      * @template B
      * @param callable(A): B $f
      * @return Query<B>

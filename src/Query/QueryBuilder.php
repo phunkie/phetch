@@ -41,7 +41,8 @@ class QueryBuilder extends Query
         private array $criteria = [],
         private array $orderBy = [],
         private ?int $limit = null,
-        private ?int $offset = null
+        private ?int $offset = null,
+        private ?Identifier $projection = null
     ) {
         parent::__construct(fn(Connection $conn) => $this->get()->run($conn));
     }
@@ -70,16 +71,31 @@ class QueryBuilder extends Query
     }
 
     /**
-     * @param list<mixed> $values
+     * @param list<mixed>|QueryBuilder $values a list of values, or a builder projected with select() used as a subquery
      */
-    public function whereIn(string $column, array $values): static
+    public function whereIn(string $column, array|QueryBuilder $values): static
     {
         if ([] === $values) {
             throw new InvalidArgumentException('whereIn needs at least one value.');
         }
 
+        if ($values instanceof QueryBuilder && null === $values->projection) {
+            throw new InvalidArgumentException('A subquery needs a select() column.');
+        }
+
         $new = clone $this;
         $new->criteria[] = [new Identifier($column), 'IN', $values];
+
+        return $new;
+    }
+
+    /**
+     * Project one column, which makes this builder usable as a subquery in whereIn().
+     */
+    public function select(string $column): static
+    {
+        $new = clone $this;
+        $new->projection = new Identifier($column);
 
         return $new;
     }
@@ -177,17 +193,32 @@ class QueryBuilder extends Query
 
     private function execute(Connection $conn, string $sql): PDOStatement
     {
+        return execute($conn, $sql, $this->params());
+    }
+
+    /**
+     * The bound values in the order the criteria, subqueries included, put their placeholders.
+     *
+     * @return list<mixed>
+     */
+    private function params(): array
+    {
         $params = [];
         foreach ($this->criteria as [, $operator, $value]) {
-            $params = 'IN' === $operator ? [...$params, ...$value] : [...$params, $value];
+            $params = match (true) {
+                $value instanceof QueryBuilder => [...$params, ...$value->params()],
+                'IN' === $operator => [...$params, ...$value],
+                default => [...$params, $value],
+            };
         }
 
-        return execute($conn, $sql, $params);
+        return $params;
     }
 
     private function selectSql(Connection $conn): string
     {
-        $sql = 'SELECT * FROM '.$conn->quote($this->table).$this->whereSql($conn);
+        $columns = null === $this->projection ? '*' : $conn->quote($this->projection);
+        $sql = 'SELECT '.$columns.' FROM '.$conn->quote($this->table).$this->whereSql($conn);
 
         if (!empty($this->orderBy)) {
             $orders = array_map(fn($order) => sprintf('%s %s', $conn->quote($order[0]), $order[1]), $this->orderBy);
@@ -220,9 +251,11 @@ class QueryBuilder extends Query
             return '';
         }
 
-        $clauses = array_map(fn(array $criterion) => 'IN' === $criterion[1]
-            ? sprintf('%s IN (%s)', $conn->quote($criterion[0]), implode(', ', array_fill(0, count($criterion[2]), '?')))
-            : sprintf('%s %s ?', $conn->quote($criterion[0]), $criterion[1]), $this->criteria);
+        $clauses = array_map(fn(array $criterion) => match (true) {
+            $criterion[2] instanceof QueryBuilder => sprintf('%s IN (%s)', $conn->quote($criterion[0]), $criterion[2]->selectSql($conn)),
+            'IN' === $criterion[1] => sprintf('%s IN (%s)', $conn->quote($criterion[0]), implode(', ', array_fill(0, count($criterion[2]), '?'))),
+            default => sprintf('%s %s ?', $conn->quote($criterion[0]), $criterion[1]),
+        }, $this->criteria);
 
         return ' WHERE '.implode(' AND ', $clauses);
     }
