@@ -6,6 +6,10 @@ use PHPUnit\Framework\TestCase;
 use Phunkie\Phetch\Attributes\Table;
 use Phunkie\Phetch\Connection\Connection;
 
+use Phunkie\Phetch\Query;
+use Phunkie\Types\Option;
+
+use function Phunkie\Effect\Functions\io\io;
 use function Phunkie\Phetch\Functions\{connect, find, create, where, all, remove};
 
 #[Table('users')]
@@ -98,6 +102,35 @@ class QueryTest extends TestCase
         $this->assertTrue(remove(User::class, 1)->run($this->conn)->unsafeRun());
         $this->assertTrue(find(User::class, 1)->run($this->conn)->unsafeRun()->isEmpty());
         $this->assertFalse(remove(User::class, 1)->run($this->conn)->unsafeRun());
+    }
+
+    public function test_pure_lifts_a_value_into_a_query()
+    {
+        $this->assertSame(42, Query::pure(42)->run($this->conn)->unsafeRun());
+    }
+
+    public function test_lift_io_embeds_an_effect_into_a_query()
+    {
+        $calls = 0;
+        $query = Query::liftIO(io(function () use (&$calls) {
+            return ++$calls;
+        }));
+
+        $this->assertSame(0, $calls);
+        $this->assertSame(1, $query->run($this->conn)->unsafeRun());
+    }
+
+    public function test_flat_map_can_branch_into_a_pure_query()
+    {
+        $greeting = find(User::class, 1)->flatMap(fn(Option $user) => $user->isDefined()
+            ? Query::pure('Hello ' . $user->get()->name)
+            : Query::pure('Hello stranger'));
+
+        $this->assertSame('Hello stranger', $greeting->run($this->conn)->unsafeRun());
+
+        create(User::class, ['name' => 'Ada', 'email' => 'ada@a.com'])->run($this->conn)->unsafeRun();
+
+        $this->assertSame('Hello Ada', $greeting->run($this->conn)->unsafeRun());
     }
 
     public function test_hydration_handles_order()

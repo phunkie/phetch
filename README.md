@@ -93,6 +93,29 @@ update(User::class, 1, ['name' => 'Jane']);
 remove(User::class, 1);
 ```
 
+### Running Queries and Composing with IO
+
+A `Query` is a function from a `Connection` to an `IO`. Nothing touches the database until you bind a connection with `run()` and then run the resulting `IO`:
+
+```php
+use Phunkie\Phetch\Query;
+use function Phunkie\Phetch\Functions\{connect, find};
+
+$conn = connect('sqlite:app.sqlite')->unsafeRun();
+
+$user = find(User::class, 1)->run($conn)->unsafeRun(); // Option<User>
+```
+
+Queries compose with `map` and `flatMap`. `Query::pure` lifts a plain value and `Query::liftIO` lifts an effect, so a chain can branch into values or effects that need no connection and still end as one `Query`:
+
+```php
+$greeting = find(User::class, 1)->flatMap(fn(Option $user) => $user->isDefined()
+    ? Query::pure('Hello ' . $user->get()->name)
+    : Query::liftIO(io(fn() => 'Hello stranger')));
+
+$greeting->run($conn); // IO<string>
+```
+
 ### Composable Queries
 
 Build queries functionally:
@@ -224,64 +247,57 @@ parallel([
 
 ### Integration with Http4p
 
-Build APIs with minimal boilerplate:
+Http4p handlers return `IO<Response>`. Compose the query, lift the response constructors with `Query::liftIO`, and bind the connection at the end with `run($conn)`:
 
 ```php
-use function Phunkie\Http4p\Functions\{HttpRoutes, GET, POST, PUT, DELETE};
-use function Phunkie\Http4p\Response\{Ok, Created, NotFound, NoContent};
-use function Phunkie\Phetch\Functions\{find, create, update, remove, where, all};
+use Phunkie\Http4p\Request;
+use Phunkie\Phetch\Query;
+use Phunkie\Types\Option;
+
+use function Phunkie\Http4p\Functions\{decode, HttpRoutes};
+use function Phunkie\Http4p\Functions\response\{Ok, Created, NotFound, NoContent};
+use function Phunkie\Http4p\Functions\routes\{GET, POST, PUT, DELETE};
+use function Phunkie\Phetch\Functions\{all, find, create, update, remove, where};
+
+$found = fn(int $id) => fn(Option $user) => $user->isDefined()
+    ? Query::pure($user->get())
+    : Query::liftIO(NotFound(['error' => sprintf('User %d not found', $id)]));
 
 $routes = HttpRoutes(
-    // List all users
     GET('/users', fn() =>
-        all(User::class)->map(fn($users) => Ok($users))
+        all(User::class)->flatMap(fn($users) => Query::liftIO(Ok($users)))->run($conn)
     ),
-    
-    // Get user by ID
+
     GET('/users/:id', fn(int $id) =>
-        find(User::class, $id)->flatMap(fn($opt) => $opt->match(
-            Some: fn($u) => Ok($u),
-            None: fn() => NotFound(['error' => 'User not found'])
-        ))
+        find(User::class, $id)->flatMap($found($id))->flatMap(fn($user) => Query::liftIO(Ok($user)))->run($conn)
     ),
-    
-    // Create user and send email asynchronously
+
     POST('/users', fn(Request $req) =>
-        create(User::class, $req->body)
-            ->flatMap(fn($user) =>
-                sendWelcomeEmail($user)
-                    ->start()  // Fork email to background
-                    ->map(fn($_) => Created($user))  // Return immediately
-            )
+        decode($req)->flatMap(fn(array $data) =>
+            create(User::class, $data)->flatMap(fn($user) => Query::liftIO(Created($user)))->run($conn)
+        )
     ),
-    
-    // Update user
+
     PUT('/users/:id', fn(int $id, Request $req) =>
-        update(User::class, $id, $req->body)->flatMap(fn($opt) => $opt->match(
-            Some: fn($u) => Ok($u),
-            None: fn() => NotFound()
-        ))
+        decode($req)->flatMap(fn(array $data) =>
+            update(User::class, $id, $data)->flatMap($found($id))->flatMap(fn($user) => Query::liftIO(Ok($user)))->run($conn)
+        )
     ),
-    
-    // Delete user
+
     DELETE('/users/:id', fn(int $id) =>
-        remove(User::class, $id)->map(fn($ok) => $ok ? NoContent() : NotFound())
+        remove(User::class, $id)->flatMap(fn(bool $deleted) => Query::liftIO($deleted ? NoContent() : NotFound()))->run($conn)
     ),
-    
-    // Get user's posts
+
     GET('/users/:id/posts', fn(int $id) =>
-        find(User::class, $id)->flatMap(fn($opt) => $opt->match(
-            Some: fn($u) => userPosts($u->id)->map(fn($posts) => Ok($posts)),
-            None: fn() => NotFound()
-        ))
+        find(User::class, $id)->flatMap($found($id))
+            ->flatMap(fn($user) => where(Post::class, 'user_id', $user->id)->orderBy('created_at', 'DESC')->get())
+            ->flatMap(fn($posts) => Query::liftIO(Ok($posts)))
+            ->run($conn)
     ),
-    
-    // Stream export
-    GET('/users/export', fn() =>
-        Ok(where(User::class, 'active', true)->stream())
-    )
 );
 ```
+
+`ImmList`, `ImmMap`, `ImmSet` and tuples are `JsonSerializable` from phunkie 1.5, so query results can be handed to the response constructors directly.
 
 ## Documentation
 

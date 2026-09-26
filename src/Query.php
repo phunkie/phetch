@@ -22,6 +22,30 @@ class Query extends Kleisli
     }
 
     /**
+     * A query that yields the value without touching the connection.
+     *
+     * @template B
+     * @param B $value
+     * @return Query<B>
+     */
+    public static function pure(mixed $value): Query
+    {
+        return new Query(fn(Connection $c) => io(fn() => $value));
+    }
+
+    /**
+     * A query that runs the effect without touching the connection.
+     *
+     * @template B
+     * @param IO<B> $io
+     * @return Query<B>
+     */
+    public static function liftIO(IO $io): Query
+    {
+        return new Query(fn(Connection $c) => $io);
+    }
+
+    /**
      * @template B
      * @param callable(A): B $f
      * @return Query<B>
