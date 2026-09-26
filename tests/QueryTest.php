@@ -75,8 +75,6 @@ class QueryTest extends TestCase
     
     public function test_stream_yields_hydrated_models()
     {
-        $this->markTestIncomplete('Blocked upstream: phunkie/streams PDOPull has no map(), so rows cannot be hydrated lazily.');
-
         create(User::class, ['name' => 'A', 'email' => 'a@a.com'])
             ->flatMap(fn($_) => create(User::class, ['name' => 'B', 'email' => 'b@b.com']))
             ->run($this->conn)
@@ -87,6 +85,7 @@ class QueryTest extends TestCase
             ->run($this->conn)
             ->unsafeRun()
             ->map(fn(User $user) => $user->name)
+            ->compile()
             ->toList();
 
         $this->assertEquals(ImmList('B'), $names);

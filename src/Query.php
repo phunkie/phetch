@@ -38,7 +38,8 @@ class Query extends Kleisli
      */
     public function flatMap(callable $f): Query
     {
-        return new Query(fn(Connection $c) => 
+        return new Query(
+            fn(Connection $c) => 
             $this->run($c)->flatMap(fn($a) => $f($a)->run($c))
         );
     }
