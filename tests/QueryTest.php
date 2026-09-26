@@ -6,7 +6,7 @@ use PHPUnit\Framework\TestCase;
 use Phunkie\Phetch\Attributes\Table;
 use Phunkie\Phetch\Connection\Connection;
 
-use function Phunkie\Phetch\Functions\{connect, find, create, where, all};
+use function Phunkie\Phetch\Functions\{connect, find, create, where, all, remove};
 
 #[Table('users')]
 readonly class User {
@@ -89,6 +89,15 @@ class QueryTest extends TestCase
             ->toList();
 
         $this->assertEquals(ImmList('B'), $names);
+    }
+
+    public function test_remove_reports_whether_a_row_was_deleted()
+    {
+        create(User::class, ['name' => 'A', 'email' => 'a@a.com'])->run($this->conn)->unsafeRun();
+
+        $this->assertTrue(remove(User::class, 1)->run($this->conn)->unsafeRun());
+        $this->assertTrue(find(User::class, 1)->run($this->conn)->unsafeRun()->isEmpty());
+        $this->assertFalse(remove(User::class, 1)->run($this->conn)->unsafeRun());
     }
 
     public function test_hydration_handles_order()

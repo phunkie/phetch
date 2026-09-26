@@ -135,7 +135,7 @@ function update(string $model, mixed $id, array $data): Query
  * Delete a record.
  * returns Query<bool>
  */
-function delete(string $model, mixed $id): Query
+function remove(string $model, mixed $id): Query
 {
     return new Query(function(Connection $conn) use ($model, $id) {
         return io(function() use ($conn, $model, $id) {

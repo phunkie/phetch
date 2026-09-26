@@ -72,7 +72,7 @@ where(User::class, 'active', true)
 All database operations are pure functions returning Query effects (ReaderT):
 
 ```php
-use function Phunkie\Phetch\Functions\{find, findBy, create, update, delete, where, all};
+use function Phunkie\Phetch\Functions\{find, findBy, create, update, remove, where, all};
 
 // Find by primary key - Query<Option<User>>
 find(User::class, 1);
@@ -90,7 +90,7 @@ create(User::class, ['name' => 'John', 'email' => 'john@example.com']);
 update(User::class, 1, ['name' => 'Jane']);
 
 // Delete - Query<bool>
-delete(User::class, 1);
+remove(User::class, 1);
 ```
 
 ### Composable Queries
@@ -229,7 +229,7 @@ Build APIs with minimal boilerplate:
 ```php
 use function Phunkie\Http4p\Functions\{HttpRoutes, GET, POST, PUT, DELETE};
 use function Phunkie\Http4p\Response\{Ok, Created, NotFound, NoContent};
-use function Phunkie\Phetch\Functions\{find, create, update, delete, where, all};
+use function Phunkie\Phetch\Functions\{find, create, update, remove, where, all};
 
 $routes = HttpRoutes(
     // List all users
@@ -265,7 +265,7 @@ $routes = HttpRoutes(
     
     // Delete user
     DELETE('/users/:id', fn(int $id) =>
-        delete(User::class, $id)->map(fn($ok) => $ok ? NoContent() : NotFound())
+        remove(User::class, $id)->map(fn($ok) => $ok ? NoContent() : NotFound())
     ),
     
     // Get user's posts
