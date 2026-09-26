@@ -11,12 +11,13 @@ use Phunkie\Phetch\Connection\Connection;
 use DateTimeImmutable;
 use InvalidArgumentException;
 use Phunkie\Phetch\ConstraintViolation;
+use Phunkie\Phetch\RowNotFound;
 use Phunkie\Phetch\Query;
 use Phunkie\Types\Option;
 use RuntimeException;
 
 use function Phunkie\Effect\Functions\io\io;
-use function Phunkie\Phetch\Functions\{connect, find, findBy, create, insert, update, where, all, remove, transaction};
+use function Phunkie\Phetch\Functions\{connect, find, findBy, findOrFail, findOrCreate, create, insert, update, where, all, remove, transaction};
 
 #[Table('users')]
 readonly class User {
@@ -154,9 +155,12 @@ class QueryTest extends TestCase
         $data = ['name' => 'Ada', 'email' => new Email('ada@example.com'), 'country' => Country::GB, 'joinedOn' => new DateTimeImmutable('2020-01-02')];
         create(Member::class, $data)->run($this->conn)->unsafeRun();
 
-        $this->expectException(ConstraintViolation::class);
-
-        create(Member::class, $data)->run($this->conn)->unsafeRun();
+        try {
+            create(Member::class, $data)->run($this->conn)->unsafeRun();
+            $this->fail('Expected a ConstraintViolation.');
+        } catch (ConstraintViolation $e) {
+            $this->assertSame('UNIQUE constraint failed: members.email', $e->getMessage());
+        }
     }
 
     public function test_insert_writes_rows_that_have_no_generated_key()
@@ -187,6 +191,58 @@ class QueryTest extends TestCase
         $this->assertEquals(ImmList('A', 'B', 'C'), $created->map(fn(User $user) => $user->name));
         $this->assertEquals(ImmList(1, 2, 3), $created->map(fn(User $user) => $user->id));
         $this->assertEquals(ImmList(), Query::traverse([], fn($x) => Query::pure($x))->run($this->conn)->unsafeRun());
+    }
+
+    public function test_find_or_fail_yields_the_row_or_throws_row_not_found()
+    {
+        create(User::class, ['name' => 'Ada', 'email' => 'ada@a.com'])->run($this->conn)->unsafeRun();
+
+        $this->assertSame('Ada', findOrFail(User::class, 1)->run($this->conn)->unsafeRun()->name);
+
+        try {
+            findOrFail(User::class, 9)->run($this->conn)->unsafeRun();
+            $this->fail('Expected RowNotFound.');
+        } catch (RowNotFound $e) {
+            $this->assertSame('User 9 not found', $e->getMessage());
+        }
+    }
+
+    public function test_find_or_create_returns_the_existing_row_or_creates_it()
+    {
+        $first = findOrCreate(User::class, ['email' => 'ada@a.com', 'name' => 'Ada'])->run($this->conn)->unsafeRun();
+        $again = findOrCreate(User::class, ['email' => 'ada@a.com', 'name' => 'Ada'])->run($this->conn)->unsafeRun();
+
+        $this->assertSame(1, $first->id);
+        $this->assertEquals($first, $again);
+        $this->assertSame(1, all(User::class)->count()->run($this->conn)->unsafeRun());
+    }
+
+    public function test_where_in_accepts_a_subquery()
+    {
+        foreach ([[1, 2], [1, 3], [2, 3]] as [$member, $group]) {
+            insert(Membership::class, ['member_id' => $member, 'group_id' => $group])->run($this->conn)->unsafeRun();
+        }
+        foreach (['A', 'B', 'C'] as $name) {
+            create(User::class, ['name' => $name, 'email' => strtolower($name) . '@a.com'])->run($this->conn)->unsafeRun();
+        }
+
+        $inGroupThree = all(User::class)->whereIn('id', where(Membership::class, 'group_id', 3)->select('member_id'))->orderBy('name')
+            ->run($this->conn)->unsafeRun();
+
+        $this->assertEquals(ImmList('A', 'B'), $inGroupThree->map(fn(User $user) => $user->name));
+    }
+
+    public function test_map_n_combines_several_queries_into_one()
+    {
+        create(User::class, ['name' => 'Ada', 'email' => 'ada@a.com'])->run($this->conn)->unsafeRun();
+        insert(Membership::class, ['member_id' => 1, 'group_id' => 2])->run($this->conn)->unsafeRun();
+
+        $summary = find(User::class, 1)
+            ->mapN([where(Membership::class, 'member_id', 1)->count(), all(User::class)->count()], fn(Option $user, int $groups, int $users) => [$user->get()->name, $groups, $users])
+            ->run($this->conn)
+            ->unsafeRun();
+
+        $this->assertSame(['Ada', 1, 1], $summary);
     }
 
     public function test_a_transaction_rolls_back_everything_when_a_step_fails()

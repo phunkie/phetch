@@ -115,19 +115,34 @@ $authorWithBooks = find(User::class, 1)->flatMap(fn(Option $user) => $user->fold
 $authorWithBooks->run($conn); // IO<Option<Pair<User, ImmList<Post>>>>
 ```
 
+Several independent queries combine with `mapN`, and one query per value runs with `traverse`:
+
+```php
+findOrFail(Book::class, $id)->flatMap(fn(Book $book) => find(Author::class, $book->authorId)
+    ->mapN([$tagsOf($book), where(Review::class, 'book_id', $book->id)->get()], fn(Option $author, ImmList $tags, ImmList $reviews) => [...]));
+
+Query::traverse($names, fn(string $name) => findOrCreate(Tag::class, ['name' => $name])); // Query<ImmList<Tag>>
+```
+
 ## CRUD Functions
 
 ```php
-use function Phunkie\Phetch\Functions\{find, findBy, all, create, update, remove, where};
+use function Phunkie\Phetch\Functions\{find, findOrFail, findBy, findOrCreate, all, create, insert, update, remove, where, transaction};
 
 find(User::class, 1);                                       // Query<Option<User>>
+findOrFail(User::class, 1);                                 // Query<User>, fails with RowNotFound
 findBy(User::class, 'email', 'ada@example.com');            // Query<Option<User>>
+findOrCreate(Tag::class, ['name' => 'maths']);              // Query<Tag>, created from the given columns when missing
 all(User::class);                                           // Query<ImmList<User>>, also a builder
-create(User::class, ['name' => 'Ada', 'email' => '...']);   // Query<User>
+create(User::class, ['name' => 'Ada', 'email' => '...']);   // Query<User>, read back by its generated key
+insert(BookTag::class, ['bookId' => 1, 'tagId' => 2]);     // Query<int>, for rows without a generated key
 update(User::class, 1, ['name' => 'Ada Lovelace']);         // Query<Option<User>>, None when the id is unknown
 remove(User::class, 1);                                     // Query<bool>, true when a row was deleted
 where(User::class, 'active', true);                         // a builder, see below
+transaction($query);                                        // Query<A>, committed on success, rolled back when it throws
 ```
+
+A write the database refuses, a duplicate key or a missing foreign row, fails with `ConstraintViolation`, whatever the driver. Enums, dates, `Stringable` objects and value objects with a single public property are stored as scalars and rebuilt on the way back.
 
 Table and column names must be identifiers (`[A-Za-z_][A-Za-z0-9_]*`) and are quoted for the driver. Anything else, including an empty array for `update`, throws `InvalidArgumentException` when the query is built, before any IO runs. Values are always bound as prepared-statement parameters.
 
@@ -147,8 +162,18 @@ $adults->stream();                                // Query<Stream<User>>
 ```
 
 - `where($column, $value)` or `where($column, $operator, $value)` with one of `=`, `!=`, `<>`, `<`, `<=`, `>`, `>=`, `LIKE`, `NOT LIKE`, `IS`, `IS NOT`
+- `whereIn($column, [...])`, or `whereIn($column, $builder->select('id'))` to embed another builder as a subquery
 - `orderBy($column, 'ASC' | 'DESC')`
 - `limit($n)` and `offset($n)`; an offset needs a limit
+- `delete()` removes the matching rows, `Query<int>`
+
+Relationships through a link table are one query:
+
+```php
+$tagsOf = fn(Book $book) => all(Tag::class)
+    ->whereIn('id', where(BookTag::class, 'book_id', $book->id)->select('tag_id'))
+    ->orderBy('name');
+```
 
 A builder is itself a `Query<ImmList<T>>`, so `all(User::class)->run($conn)` fetches every row without calling `get()`.
 
@@ -256,73 +281,68 @@ See [docs/migrations](docs/migrations/getting-started.md) for details.
 
 ## Integration with Http4p
 
-Http4p handlers return `IO<Response>`. Run the query, then compose the response in `IO`. `decode($req, User::class)` validates the body against the entity's constructor: on `POST` and `PUT` every parameter without a default is required except those marked `#[Generated]`, a `PATCH` may send any subset, unknown and generated fields are dropped, and a bad body is answered with a `400` listing the errors before the handler runs. `Option::fold` picks the response for a missing row. A `routes.php` that receives the connection is all the structure an app needs:
+Http4p handlers return `IO<Response>`. Run the query, then compose the response in `IO`. `decode($req, User::class)` validates the body against the entity's constructor: the path parameters fill the parameters of the same name, on `POST` and `PUT` every parameter without a default is required except those marked `#[Generated]`, a `PATCH` may send any subset, and a bad body is answered with a `400` listing the errors before the handler runs. `findOrFail` and `ConstraintViolation` become `404` and `409` through http4p's `Recover` middleware, once for the whole app. The response constructors take the body as their first argument, so `->flatMap(Ok(...))` is all a handler needs to answer:
 
 ```php
 <?php
 
 use Phunkie\Http4p\Request;
+use Phunkie\Http4p\Router;
 use Phunkie\Phetch\Connection\Connection;
-use Phunkie\Types\ImmList;
-use Phunkie\Types\Option;
+use Phunkie\Phetch\ConstraintViolation;
+use Phunkie\Phetch\RowNotFound;
 
 use function Phunkie\Http4p\Functions\decode;
 use function Phunkie\Http4p\Functions\HttpRoutes;
-use function Phunkie\Http4p\Functions\response\{Created, NoContent, NotFound, Ok};
+use function Phunkie\Http4p\Functions\middleware\{Recover, Through};
+use function Phunkie\Http4p\Functions\response\{Conflict, Created, NoContent, NotFound, Ok};
 use function Phunkie\Http4p\Functions\routes\{DELETE, GET, PATCH, POST};
-use function Phunkie\Phetch\Functions\{all, create, find, remove, update, where};
+use function Phunkie\Phetch\Functions\{all, create, findOrFail, remove, update, where};
 
-return function (Connection $conn): ImmList {
-    $notFound = fn(int $id) => NotFound(['error' => sprintf('User %d not found', $id)]);
+return fn(Connection $conn): callable => Through(
+    new Router(HttpRoutes(
+        GET('/users', fn() => all(User::class)->run($conn)->flatMap(Ok(...))),
 
-    return HttpRoutes(
-        GET('/users', fn() =>
-            all(User::class)->run($conn)->flatMap(fn(ImmList $users) => Ok($users))
-        ),
-
-        GET('/users/:id', fn(int $id) =>
-            find(User::class, $id)->run($conn)->flatMap(fn(Option $user) =>
-                $user->fold($notFound($id), fn(User $found) => Ok($found)))
-        ),
+        GET('/users/:id', fn(int $id) => findOrFail(User::class, $id)->run($conn)->flatMap(Ok(...))),
 
         POST('/users', fn(Request $req) =>
             decode($req, User::class)
                 ->flatMap(fn(array $data) => create(User::class, $data)->run($conn))
-                ->flatMap(fn(User $user) => Created($user))
+                ->flatMap(Created(...))
         ),
 
         PATCH('/users/:id', fn(int $id, Request $req) =>
             decode($req, User::class)
-                ->flatMap(fn(array $data) => update(User::class, $id, $data)->run($conn))
-                ->flatMap(fn(Option $user) => $user->fold($notFound($id), fn(User $updated) => Ok($updated)))
+                ->flatMap(fn(array $data) => findOrFail(User::class, $id)->flatMap(fn() => update(User::class, $id, $data))->run($conn))
+                ->flatMap(fn(Option $user) => Ok($user->get()))
         ),
 
         DELETE('/users/:id', fn(int $id) =>
-            remove(User::class, $id)->run($conn)->flatMap(fn(bool $deleted) => $deleted ? NoContent() : $notFound($id))
+            remove(User::class, $id)->run($conn)->flatMap(fn(bool $deleted) => $deleted ? NoContent() : NotFound())
         ),
 
-        GET('/users/:id/posts', fn(int $id) =>
-            find(User::class, $id)->run($conn)->flatMap(fn(Option $user) => $user->fold(
-                $notFound($id),
-                fn(User $found) => where(Post::class, 'user_id', $found->id)->orderBy('created_at', 'DESC')->run($conn)
-                    ->flatMap(fn(ImmList $posts) => Ok($posts)),
-            ))
+        GET('/users/:userId/posts', fn(int $userId) =>
+            findOrFail(User::class, $userId)
+                ->flatMap(fn(User $user) => where(Post::class, 'user_id', $user->id)->orderBy('created_at', 'DESC'))
+                ->run($conn)->flatMap(Ok(...))
         ),
 
         GET('/users/export', fn() =>
             where(User::class, 'active', true)->stream()->run($conn)
                 ->flatMap(fn($users) => Ok($users->map(fn(User $user) => json_encode($user) . "\n")))
         ),
-    );
-};
+    )),
+    Recover(RowNotFound::class, fn(RowNotFound $e) => NotFound(['error' => $e->getMessage()])),
+    Recover(ConstraintViolation::class, fn(ConstraintViolation $e) => Conflict(['error' => $e->getMessage()])),
+);
 ```
 
 ```php
 // public/index.php
-$routes = require dirname(__DIR__) . '/routes.php';
+$app = require dirname(__DIR__) . '/routes.php';
 
 connect('sqlite:app.sqlite')
-    ->flatMap(fn(Connection $conn) => (new PhpServer($routes($conn)))->run())
+    ->flatMap(fn(Connection $conn) => (new PhpServer($app($conn)))->run())
     ->unsafeRun();
 ```
 
@@ -339,7 +359,17 @@ $conn = connect('sqlite::memory:')->unsafeRun();
 
 ## Documentation
 
-- [Migrations](docs/index.md)
+Full documentation is in [docs/](docs/index.md).
+
+- [Quick Start](docs/getting-started/quick-start.md)
+- [Models](docs/core/models.md) and [Queries](docs/core/queries.md)
+- [CRUD Operations](docs/crud/operations.md) and the [Query Builder](docs/querying/builder.md)
+- [Relationships](docs/querying/relationships.md)
+- [Errors and Transactions](docs/core/errors-and-transactions.md)
+- [Streaming](docs/streaming/queries.md)
+- [Http4p Integration](docs/integration/http4p.md)
+- [Testing](docs/advanced/testing.md)
+- [Migrations](docs/migrations/getting-started.md)
 
 ## License
 

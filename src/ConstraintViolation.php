@@ -13,7 +13,7 @@ final class ConstraintViolation extends RuntimeException
 {
     public static function from(PDOException $exception): self
     {
-        return new self($exception->getMessage(), 0, $exception);
+        return new self(preg_replace('/^SQLSTATE\[\w+\]: [^:]+: \d+ /', '', $exception->getMessage()), 0, $exception);
     }
 
     public static function explains(PDOException $exception): bool

@@ -54,6 +54,16 @@ class QueryBuilderTest extends TestCase
         $this->builder()->where('age', '>', 18)->whereIn('id', [1, 3])->get()->run($conn)->unsafeRun();
     }
 
+    public function test_where_in_embeds_a_subquery_with_its_parameters_in_order()
+    {
+        $conn = $this->connectionExpecting('sqlite', 'SELECT * FROM "users" WHERE "active" = ? AND "id" IN (SELECT "member_id" FROM "memberships" WHERE "group_id" = ?) AND "age" > ?', [1, 3, 18]);
+
+        $this->builder()->where('active', 1)
+            ->whereIn('id', (new QueryBuilder('Membership', new Identifier('memberships')))->where('group_id', 3)->select('member_id'))
+            ->where('age', '>', 18)
+            ->get()->run($conn)->unsafeRun();
+    }
+
     public function test_delete_removes_the_matching_rows()
     {
         $conn = $this->connectionExpecting('sqlite', 'DELETE FROM "users" WHERE "age" > ?', [18], rowCount: 4);

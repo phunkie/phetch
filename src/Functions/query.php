@@ -15,6 +15,7 @@ use Phunkie\Phetch\ConstraintViolation;
 use Phunkie\Phetch\Identifier;
 use Phunkie\Phetch\Query;
 use Phunkie\Phetch\Query\QueryBuilder;
+use Phunkie\Phetch\RowNotFound;
 use Phunkie\Types\Option;
 use ReflectionClass;
 use ReflectionNamedType;
@@ -55,6 +56,29 @@ function findBy(string $model, string $column, mixed $value): Query
             return $data === false ? None() : Some(hydrate($model, $data));
         });
     });
+}
+
+/**
+ * Find a record by primary key, failing with RowNotFound when there is none.
+ * returns Query<T>
+ */
+function findOrFail(string $model, mixed $id): Query
+{
+    return find($model, $id)->map(fn(Option $row) => $row->getOrElse(null) ?? throw RowNotFound::for($model, $id));
+}
+
+/**
+ * The record matching every given column, created from them when there is none.
+ * returns Query<T>
+ */
+function findOrCreate(string $model, array $by): Query
+{
+    $matching = all($model);
+    foreach ($by as $column => $value) {
+        $matching = $matching->where((string) $column, $value);
+    }
+
+    return $matching->first()->flatMap(fn(Option $row) => $row->fold(create($model, $by), fn($found) => Query::pure($found)));
 }
 
 /**
