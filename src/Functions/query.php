@@ -232,7 +232,8 @@ function insertSql(Connection $conn, Identifier $table, array $columns): string
 }
 
 /**
- * The scalar a value is stored as: enums by their backing value, dates as "Y-m-d H:i:s", string objects as text.
+ * The scalar a value is stored as: enums by their backing value, dates as "Y-m-d H:i:s", string objects
+ * as text, and a value object with a single public property by that property.
  */
 function toColumnValue(mixed $value): mixed
 {
@@ -240,6 +241,7 @@ function toColumnValue(mixed $value): mixed
         $value instanceof BackedEnum => $value->value,
         $value instanceof DateTimeInterface => $value->format('Y-m-d H:i:s'),
         $value instanceof Stringable => (string) $value,
+        is_object($value) && 1 === count(get_object_vars($value)) => current(get_object_vars($value)),
         is_bool($value) => (int) $value,
         default => $value,
     };

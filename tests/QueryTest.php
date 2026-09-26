@@ -72,6 +72,14 @@ final readonly class Email {
     }
 }
 
+final readonly class Rating {
+    public function __construct(public int $value) {
+        if ($value < 1 || $value > 5) {
+            throw new InvalidArgumentException('must be between 1 and 5');
+        }
+    }
+}
+
 #[Table('members')]
 readonly class Member {
     public function __construct(
@@ -81,7 +89,8 @@ readonly class Member {
         public Email $email,
         public Country $country,
         public DateTimeImmutable $joinedOn,
-        public ?string $nickname = null
+        public ?string $nickname = null,
+        public ?Rating $rating = null
     ) {}
 }
 
@@ -115,7 +124,7 @@ class QueryTest extends TestCase
         $pdo->exec('CREATE TABLE teams (id INTEGER PRIMARY KEY, name TEXT, "group" TEXT)');
         $pdo->exec('CREATE TABLE books (id INTEGER PRIMARY KEY, author_id INTEGER, title TEXT, published_year INTEGER)');
         $pdo->exec('CREATE TABLE accounts (account_id INTEGER PRIMARY KEY, name TEXT)');
-        $pdo->exec('CREATE TABLE members (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, country TEXT NOT NULL, joined_on TEXT NOT NULL, nickname TEXT)');
+        $pdo->exec('CREATE TABLE members (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, country TEXT NOT NULL, joined_on TEXT NOT NULL, nickname TEXT, rating INTEGER)');
         $pdo->exec('CREATE TABLE memberships (member_id INTEGER NOT NULL, group_id INTEGER NOT NULL, PRIMARY KEY (member_id, group_id))');
     }
 
@@ -126,15 +135,17 @@ class QueryTest extends TestCase
             'email' => new Email('ada@example.com'),
             'country' => Country::GB,
             'joinedOn' => new DateTimeImmutable('2020-01-02 03:04:05'),
+            'rating' => new Rating(4),
         ])->run($this->conn)->unsafeRun();
 
         $this->assertEquals(new Email('ada@example.com'), $member->email);
+        $this->assertEquals(new Rating(4), $member->rating);
         $this->assertSame(Country::GB, $member->country);
         $this->assertEquals(new DateTimeImmutable('2020-01-02 03:04:05'), $member->joinedOn);
         $this->assertNull($member->nickname);
 
-        $row = $this->conn->pdo()->query('SELECT email, country, joined_on FROM members')->fetch();
-        $this->assertSame(['email' => 'ada@example.com', 'country' => 'GB', 'joined_on' => '2020-01-02 03:04:05'], $row);
+        $row = $this->conn->pdo()->query('SELECT email, country, joined_on, rating FROM members')->fetch();
+        $this->assertSame(['email' => 'ada@example.com', 'country' => 'GB', 'joined_on' => '2020-01-02 03:04:05', 'rating' => 4], $row);
         $this->assertEquals($member, findBy(Member::class, 'country', Country::GB)->run($this->conn)->unsafeRun()->get());
     }
 
