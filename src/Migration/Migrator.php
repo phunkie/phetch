@@ -48,17 +48,8 @@ class Migrator
 
                     echo "Migrating: $name\n";
                     require_once $file;
-                    
-                    // Simple inference: File 2023_..._MyMigration.php -> Class MyMigration
-                    // Strip numeric prefix
-                    $className = preg_replace('/^\d+_/', '', $name);
-                    
-                    if (!class_exists($className)) {
-                        // try to find class match in declared classes?
-                        // Or strict convention.
-                        // convention: file 2023_01_01_000000_CreateUsers.php class CreateUsers
-                    }
 
+                    $className = $this->classNameOf($name);
                     $migration = new $className();
                     if ($migration instanceof Migration) {
                         $migration->up()->run($conn)->unsafeRun();
@@ -92,7 +83,7 @@ class Migrator
                     $file = $this->path . '/' . $name . '.php';
                     if (file_exists($file)) {
                         require_once $file;
-                        $className = preg_replace('/^\d+_/', '', $name);
+                        $className = $this->classNameOf($name);
                         $migration = new $className();
                         if ($migration instanceof Migration) {
                             $migration->down()->run($conn)->unsafeRun();
@@ -119,6 +110,11 @@ class Migrator
             file_put_contents($this->path . '/' . $fileName, $content);
             echo "Created Migration: $fileName\n";
         });
+    }
+
+    private function classNameOf(string $migrationName): string
+    {
+        return preg_replace('/^(\d+_)+/', '', $migrationName);
     }
 
     private function getExecuted(Connection $conn): array

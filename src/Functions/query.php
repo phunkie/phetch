@@ -7,11 +7,12 @@ use Phunkie\Phetch\Connection\Connection;
 use Phunkie\Phetch\Query\QueryBuilder;
 use Phunkie\Phetch\Attributes\Table;
 use Phunkie\Phetch\Query;
-use Phunkie\Types\Option;
 use Phunkie\Types\ImmList;
 use ReflectionClass;
 
 use function Phunkie\Effect\Functions\io\io;
+use function None;
+use function Some;
 
 /**
  * Find a record by ID.
@@ -26,7 +27,7 @@ function find(string $model, mixed $id): Query
             $stmt->execute([$id]);
             $data = $stmt->fetch();
             
-            return $data === false ? Option::none() : Option::some(hydrate($model, $data));
+            return $data === false ? None() : Some(hydrate($model, $data));
         });
     });
 }
@@ -44,7 +45,7 @@ function findBy(string $model, string $column, mixed $value): Query
             $stmt->execute([$value]);
             $data = $stmt->fetch();
             
-            return $data === false ? Option::none() : Option::some(hydrate($model, $data));
+            return $data === false ? None() : Some(hydrate($model, $data));
         });
     });
 }
@@ -125,7 +126,7 @@ function update(string $model, mixed $id, array $data): Query
             $stmt->execute([$id]);
             $row = $stmt->fetch();
             
-            return $row === false ? Option::none() : Option::some(hydrate($model, $row));
+            return $row === false ? None() : Some(hydrate($model, $row));
         });
     });
 }

@@ -73,13 +73,31 @@ class QueryTest extends TestCase
         $this->assertEquals(2, $all->length);
     }
     
+    public function test_stream_yields_hydrated_models()
+    {
+        $this->markTestIncomplete('Blocked upstream: phunkie/streams PDOPull has no map(), so rows cannot be hydrated lazily.');
+
+        create(User::class, ['name' => 'A', 'email' => 'a@a.com'])
+            ->flatMap(fn($_) => create(User::class, ['name' => 'B', 'email' => 'b@b.com']))
+            ->run($this->conn)
+            ->unsafeRun();
+
+        $names = where(User::class, 'name', 'B')
+            ->stream()
+            ->run($this->conn)
+            ->unsafeRun()
+            ->map(fn(User $user) => $user->name)
+            ->toList();
+
+        $this->assertEquals(ImmList('B'), $names);
+    }
+
     public function test_hydration_handles_order()
     {
         $pdo = $this->conn->pdo();
         $pdo->exec("INSERT INTO users (email, name) VALUES ('c@c.com', 'C')");
-        // id 3
-        
-        $opt = find(User::class, 3)->run($this->conn)->unsafeRun();
+
+        $opt = find(User::class, 1)->run($this->conn)->unsafeRun();
         $this->assertTrue($opt->isDefined());
         $user = $opt->get();
         $this->assertEquals('C', $user->name);

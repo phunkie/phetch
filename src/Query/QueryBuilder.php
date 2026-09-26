@@ -10,7 +10,7 @@ use Phunkie\Types\ImmList;
 use Phunkie\Phetch\Functions;
 
 use function Phunkie\Effect\Functions\io\io;
-use function Phunkie\Streams\Functions\pdo\StreamFromPDO;
+use function StreamFromPDO;
 
 class QueryBuilder
 {
