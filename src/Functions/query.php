@@ -2,17 +2,26 @@
 
 namespace Phunkie\Phetch\Functions;
 
+use BackedEnum;
+use DateTimeImmutable;
+use DateTimeInterface;
 use InvalidArgumentException;
+use PDOException;
+use PDOStatement;
 use Phunkie\Phetch\Attributes\Column;
 use Phunkie\Phetch\Attributes\Table;
 use Phunkie\Phetch\Connection\Connection;
+use Phunkie\Phetch\ConstraintViolation;
 use Phunkie\Phetch\Identifier;
 use Phunkie\Phetch\Query;
 use Phunkie\Phetch\Query\QueryBuilder;
 use Phunkie\Types\Option;
 use ReflectionClass;
+use ReflectionNamedType;
 use ReflectionParameter;
 use RuntimeException;
+use Stringable;
+use Throwable;
 
 use function Phunkie\Effect\Functions\io\io;
 use function None;
@@ -40,8 +49,7 @@ function findBy(string $model, string $column, mixed $value): Query
 
     return new Query(function(Connection $conn) use ($model, $table, $column, $value) {
         return io(function() use ($conn, $model, $table, $column, $value) {
-            $stmt = $conn->pdo()->prepare(sprintf('SELECT * FROM %s WHERE %s = ? LIMIT 1', $conn->quote($table), $conn->quote($column)));
-            $stmt->execute([$value]);
+            $stmt = execute($conn, sprintf('SELECT * FROM %s WHERE %s = ? LIMIT 1', $conn->quote($table), $conn->quote($column)), [$value]);
             $data = $stmt->fetch();
 
             return $data === false ? None() : Some(hydrate($model, $data));
@@ -58,7 +66,7 @@ function all(string $model): QueryBuilder
 }
 
 /**
- * Create a new record.
+ * Create a new record and read it back by its generated key.
  * returns Query<T>
  */
 function create(string $model, array $data): Query
@@ -68,16 +76,23 @@ function create(string $model, array $data): Query
 
     return new Query(function(Connection $conn) use ($model, $table, $columns, $data) {
         return io(function() use ($conn, $model, $table, $columns, $data) {
-            $pdo = $conn->pdo();
-            $quoted = implode(', ', array_map(fn(Identifier $column) => $conn->quote($column), $columns));
-            $placeholders = implode(', ', array_fill(0, count($columns), '?'));
+            execute($conn, insertSql($conn, $table, $columns), array_values($data));
 
-            $stmt = $pdo->prepare(sprintf('INSERT INTO %s (%s) VALUES (%s)', $conn->quote($table), $quoted, $placeholders));
-            $stmt->execute(array_values($data));
-
-            return fetchById($conn, $model, $table, $pdo->lastInsertId())->get();
+            return fetchById($conn, $model, $table, $conn->pdo()->lastInsertId())->get();
         });
     });
+}
+
+/**
+ * Write a row without reading it back, for tables whose key is not generated.
+ * returns Query<int> the number of rows written
+ */
+function insert(string $model, array $data): Query
+{
+    $table = tableOf($model);
+    $columns = columnsOf($model, $data);
+
+    return new Query(fn(Connection $conn) => io(fn() => execute($conn, insertSql($conn, $table, $columns), array_values($data))->rowCount()));
 }
 
 /**
@@ -110,8 +125,7 @@ function update(string $model, mixed $id, array $data): Query
         return io(function() use ($conn, $model, $table, $columns, $id, $data) {
             $sets = implode(', ', array_map(fn(Identifier $column) => $conn->quote($column).' = ?', $columns));
 
-            $stmt = $conn->pdo()->prepare(sprintf('UPDATE %s SET %s WHERE %s = ?', $conn->quote($table), $sets, $conn->quote(primaryKey($model))));
-            $stmt->execute([...array_values($data), $id]);
+            execute($conn, sprintf('UPDATE %s SET %s WHERE %s = ?', $conn->quote($table), $sets, $conn->quote(primaryKey($model))), [...array_values($data), $id]);
 
             return fetchById($conn, $model, $table, $id);
         });
@@ -128,10 +142,39 @@ function remove(string $model, mixed $id): Query
 
     return new Query(function(Connection $conn) use ($model, $table, $id) {
         return io(function() use ($conn, $model, $table, $id) {
-            $stmt = $conn->pdo()->prepare(sprintf('DELETE FROM %s WHERE %s = ?', $conn->quote($table), $conn->quote(primaryKey($model))));
-            $stmt->execute([$id]);
+            $stmt = execute($conn, sprintf('DELETE FROM %s WHERE %s = ?', $conn->quote($table), $conn->quote(primaryKey($model))), [$id]);
 
             return $stmt->rowCount() > 0;
+        });
+    });
+}
+
+/**
+ * Run a query inside a transaction: committed when it succeeds, rolled back when it throws.
+ *
+ * @template A
+ * @param Query<A> $query
+ * @return Query<A>
+ */
+function transaction(Query $query): Query
+{
+    return new Query(function(Connection $conn) use ($query) {
+        return io(function() use ($conn, $query) {
+            $pdo = $conn->pdo();
+            $pdo->beginTransaction();
+
+            try {
+                $result = $query->run($conn)->unsafeRun();
+                $pdo->commit();
+
+                return $result;
+            } catch (Throwable $e) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+
+                throw $e;
+            }
         });
     });
 }
@@ -161,6 +204,47 @@ function tableAttribute(string $class): ?Table
     $attributes = (new ReflectionClass($class))->getAttributes(Table::class);
 
     return [] === $attributes ? null : $attributes[0]->newInstance();
+}
+
+/**
+ * Prepare and run a statement, binding values as the driver can take them.
+ *
+ * @throws ConstraintViolation when the database refuses the write
+ */
+function execute(Connection $conn, string $sql, array $params): PDOStatement
+{
+    try {
+        $stmt = $conn->pdo()->prepare($sql);
+        $stmt->execute(array_map(fn($value) => toColumnValue($value), $params));
+
+        return $stmt;
+    } catch (PDOException $e) {
+        throw ConstraintViolation::explains($e) ? ConstraintViolation::from($e) : $e;
+    }
+}
+
+function insertSql(Connection $conn, Identifier $table, array $columns): string
+{
+    $quoted = implode(', ', array_map(fn(Identifier $column) => $conn->quote($column), $columns));
+    $placeholders = implode(', ', array_fill(0, count($columns), '?'));
+
+    return sprintf('INSERT INTO %s (%s) VALUES (%s)', $conn->quote($table), $quoted, $placeholders);
+}
+
+/**
+ * The scalar a value is stored as: enums by their backing value, dates as "Y-m-d H:i:s", string objects
+ * as text, and a value object with a single public property by that property.
+ */
+function toColumnValue(mixed $value): mixed
+{
+    return match (true) {
+        $value instanceof BackedEnum => $value->value,
+        $value instanceof DateTimeInterface => $value->format('Y-m-d H:i:s'),
+        $value instanceof Stringable => (string) $value,
+        is_object($value) && 1 === count(get_object_vars($value)) => current(get_object_vars($value)),
+        is_bool($value) => (int) $value,
+        default => $value,
+    };
 }
 
 /**
@@ -194,8 +278,7 @@ function columnOf(ReflectionParameter $param): string
  */
 function fetchById(Connection $conn, string $model, Identifier $table, mixed $id): Option
 {
-    $stmt = $conn->pdo()->prepare(sprintf('SELECT * FROM %s WHERE %s = ?', $conn->quote($table), $conn->quote(primaryKey($model))));
-    $stmt->execute([$id]);
+    $stmt = execute($conn, sprintf('SELECT * FROM %s WHERE %s = ?', $conn->quote($table), $conn->quote(primaryKey($model))), [$id]);
     $row = $stmt->fetch();
 
     return $row === false ? None() : Some(hydrate($model, $row));
@@ -214,7 +297,7 @@ function hydrate(string $class, array $data): object
     foreach ($constructor->getParameters() as $param) {
         $column = columnFor($param, $data);
         if (null !== $column) {
-            $args[] = $data[$column];
+            $args[] = fromColumnValue($param, $data[$column]);
 
             continue;
         }
@@ -248,6 +331,26 @@ function columnFor(ReflectionParameter $param, array $data): ?string
     }
 
     return null;
+}
+
+/**
+ * The value a stored scalar becomes for a parameter typed with a backed enum, a date class or a value object.
+ */
+function fromColumnValue(ReflectionParameter $param, mixed $value): mixed
+{
+    $type = $param->getType();
+    if (null === $value || !$type instanceof ReflectionNamedType || $type->isBuiltin()) {
+        return $value;
+    }
+
+    $class = $type->getName();
+
+    return match (true) {
+        is_subclass_of($class, BackedEnum::class) => $class::from($value),
+        $class === DateTimeInterface::class => new DateTimeImmutable($value),
+        is_a($class, DateTimeInterface::class, true) => new $class($value),
+        default => new $class($value),
+    };
 }
 
 function snakeCase(string $name): string

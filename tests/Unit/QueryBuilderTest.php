@@ -47,6 +47,20 @@ class QueryBuilderTest extends TestCase
         $this->assertTrue($this->builder()->where('age', '>', 18)->first()->run($conn)->unsafeRun()->isEmpty());
     }
 
+    public function test_where_in_binds_one_placeholder_per_value()
+    {
+        $conn = $this->connectionExpecting('sqlite', 'SELECT * FROM "users" WHERE "age" > ? AND "id" IN (?, ?)', [18, 1, 3]);
+
+        $this->builder()->where('age', '>', 18)->whereIn('id', [1, 3])->get()->run($conn)->unsafeRun();
+    }
+
+    public function test_delete_removes_the_matching_rows()
+    {
+        $conn = $this->connectionExpecting('sqlite', 'DELETE FROM "users" WHERE "age" > ?', [18], rowCount: 4);
+
+        $this->assertSame(4, $this->builder()->where('age', '>', 18)->delete()->run($conn)->unsafeRun());
+    }
+
     public function test_rejects_a_column_name_that_is_not_an_identifier()
     {
         $this->expectException(InvalidArgumentException::class);
@@ -73,7 +87,7 @@ class QueryBuilderTest extends TestCase
         return new QueryBuilder('User', new Identifier('users'));
     }
 
-    private function connectionExpecting(string $driver, string $sql, array $params, mixed $fetchColumn = false): Connection
+    private function connectionExpecting(string $driver, string $sql, array $params, mixed $fetchColumn = false, int $rowCount = 0): Connection
     {
         $pdo = $this->createMock(PDO::class);
         $stmt = $this->createMock(PDOStatement::class);
@@ -83,6 +97,7 @@ class QueryBuilderTest extends TestCase
         $stmt->method('fetchAll')->willReturn([]);
         $stmt->method('fetch')->willReturn(false);
         $stmt->method('fetchColumn')->willReturn($fetchColumn);
+        $stmt->method('rowCount')->willReturn($rowCount);
 
         return new Connection($pdo);
     }

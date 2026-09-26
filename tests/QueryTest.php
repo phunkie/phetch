@@ -8,12 +8,15 @@ use Phunkie\Phetch\Attributes\Generated;
 use Phunkie\Phetch\Attributes\Table;
 use Phunkie\Phetch\Connection\Connection;
 
+use DateTimeImmutable;
 use InvalidArgumentException;
+use Phunkie\Phetch\ConstraintViolation;
 use Phunkie\Phetch\Query;
 use Phunkie\Types\Option;
+use RuntimeException;
 
 use function Phunkie\Effect\Functions\io\io;
-use function Phunkie\Phetch\Functions\{connect, find, findBy, create, update, where, all, remove};
+use function Phunkie\Phetch\Functions\{connect, find, findBy, create, insert, update, where, all, remove, transaction};
 
 #[Table('users')]
 readonly class User {
@@ -52,6 +55,53 @@ readonly class Account {
     ) {}
 }
 
+enum Country: string {
+    case GB = 'GB';
+    case PT = 'PT';
+}
+
+final readonly class Email {
+    public function __construct(public string $value) {
+        if (!filter_var($value, FILTER_VALIDATE_EMAIL)) {
+            throw new InvalidArgumentException('must be an email address');
+        }
+    }
+
+    public function __toString(): string {
+        return $this->value;
+    }
+}
+
+final readonly class Rating {
+    public function __construct(public int $value) {
+        if ($value < 1 || $value > 5) {
+            throw new InvalidArgumentException('must be between 1 and 5');
+        }
+    }
+}
+
+#[Table('members')]
+readonly class Member {
+    public function __construct(
+        #[Generated]
+        public int $id,
+        public string $name,
+        public Email $email,
+        public Country $country,
+        public DateTimeImmutable $joinedOn,
+        public ?string $nickname = null,
+        public ?Rating $rating = null
+    ) {}
+}
+
+#[Table('memberships')]
+readonly class Membership {
+    public function __construct(
+        public int $member_id,
+        public int $group_id
+    ) {}
+}
+
 #[Table('users; DROP TABLE users')]
 readonly class Hostile {
     public function __construct(public int $id) {}
@@ -74,6 +124,85 @@ class QueryTest extends TestCase
         $pdo->exec('CREATE TABLE teams (id INTEGER PRIMARY KEY, name TEXT, "group" TEXT)');
         $pdo->exec('CREATE TABLE books (id INTEGER PRIMARY KEY, author_id INTEGER, title TEXT, published_year INTEGER)');
         $pdo->exec('CREATE TABLE accounts (account_id INTEGER PRIMARY KEY, name TEXT)');
+        $pdo->exec('CREATE TABLE members (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, country TEXT NOT NULL, joined_on TEXT NOT NULL, nickname TEXT, rating INTEGER)');
+        $pdo->exec('CREATE TABLE memberships (member_id INTEGER NOT NULL, group_id INTEGER NOT NULL, PRIMARY KEY (member_id, group_id))');
+    }
+
+    public function test_value_objects_enums_and_dates_round_trip_as_scalar_columns()
+    {
+        $member = create(Member::class, [
+            'name' => 'Ada',
+            'email' => new Email('ada@example.com'),
+            'country' => Country::GB,
+            'joinedOn' => new DateTimeImmutable('2020-01-02 03:04:05'),
+            'rating' => new Rating(4),
+        ])->run($this->conn)->unsafeRun();
+
+        $this->assertEquals(new Email('ada@example.com'), $member->email);
+        $this->assertEquals(new Rating(4), $member->rating);
+        $this->assertSame(Country::GB, $member->country);
+        $this->assertEquals(new DateTimeImmutable('2020-01-02 03:04:05'), $member->joinedOn);
+        $this->assertNull($member->nickname);
+
+        $row = $this->conn->pdo()->query('SELECT email, country, joined_on, rating FROM members')->fetch();
+        $this->assertSame(['email' => 'ada@example.com', 'country' => 'GB', 'joined_on' => '2020-01-02 03:04:05', 'rating' => 4], $row);
+        $this->assertEquals($member, findBy(Member::class, 'country', Country::GB)->run($this->conn)->unsafeRun()->get());
+    }
+
+    public function test_a_constraint_violation_is_reported_as_such()
+    {
+        $data = ['name' => 'Ada', 'email' => new Email('ada@example.com'), 'country' => Country::GB, 'joinedOn' => new DateTimeImmutable('2020-01-02')];
+        create(Member::class, $data)->run($this->conn)->unsafeRun();
+
+        $this->expectException(ConstraintViolation::class);
+
+        create(Member::class, $data)->run($this->conn)->unsafeRun();
+    }
+
+    public function test_insert_writes_rows_that_have_no_generated_key()
+    {
+        $rows = insert(Membership::class, ['member_id' => 1, 'group_id' => 2])->run($this->conn)->unsafeRun();
+
+        $this->assertSame(1, $rows);
+        $this->assertSame(1, where(Membership::class, 'member_id', 1)->count()->run($this->conn)->unsafeRun());
+    }
+
+    public function test_where_in_and_delete_on_the_builder()
+    {
+        foreach ([[1, 2], [1, 3], [2, 2]] as [$member, $group]) {
+            insert(Membership::class, ['member_id' => $member, 'group_id' => $group])->run($this->conn)->unsafeRun();
+        }
+
+        $this->assertSame(2, where(Membership::class, 'member_id', 1)->whereIn('group_id', [2, 3])->count()->run($this->conn)->unsafeRun());
+        $this->assertSame(2, where(Membership::class, 'member_id', 1)->delete()->run($this->conn)->unsafeRun());
+        $this->assertSame(1, all(Membership::class)->count()->run($this->conn)->unsafeRun());
+    }
+
+    public function test_traverse_runs_one_query_per_value_in_order_and_collects_the_results()
+    {
+        $created = Query::traverse(['A', 'B', 'C'], fn(string $name) => create(User::class, ['name' => $name, 'email' => strtolower($name) . '@a.com']))
+            ->run($this->conn)
+            ->unsafeRun();
+
+        $this->assertEquals(ImmList('A', 'B', 'C'), $created->map(fn(User $user) => $user->name));
+        $this->assertEquals(ImmList(1, 2, 3), $created->map(fn(User $user) => $user->id));
+        $this->assertEquals(ImmList(), Query::traverse([], fn($x) => Query::pure($x))->run($this->conn)->unsafeRun());
+    }
+
+    public function test_a_transaction_rolls_back_everything_when_a_step_fails()
+    {
+        $work = create(User::class, ['name' => 'A', 'email' => 'a@a.com'])
+            ->flatMap(fn() => Query::liftIO(io(fn() => throw new RuntimeException('boom'))));
+
+        try {
+            transaction($work)->run($this->conn)->unsafeRun();
+            $this->fail('The transaction should have failed.');
+        } catch (RuntimeException $e) {
+            $this->assertSame('boom', $e->getMessage());
+        }
+
+        $this->assertSame(0, all(User::class)->count()->run($this->conn)->unsafeRun());
+        $this->assertSame('B', transaction(create(User::class, ['name' => 'B', 'email' => 'b@b.com']))->run($this->conn)->unsafeRun()->name);
     }
 
     public function test_columns_map_to_parameters_by_attribute_or_by_snake_case()
