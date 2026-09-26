@@ -155,9 +155,12 @@ class QueryTest extends TestCase
         $data = ['name' => 'Ada', 'email' => new Email('ada@example.com'), 'country' => Country::GB, 'joinedOn' => new DateTimeImmutable('2020-01-02')];
         create(Member::class, $data)->run($this->conn)->unsafeRun();
 
-        $this->expectException(ConstraintViolation::class);
-
-        create(Member::class, $data)->run($this->conn)->unsafeRun();
+        try {
+            create(Member::class, $data)->run($this->conn)->unsafeRun();
+            $this->fail('Expected a ConstraintViolation.');
+        } catch (ConstraintViolation $e) {
+            $this->assertSame('UNIQUE constraint failed: members.email', $e->getMessage());
+        }
     }
 
     public function test_insert_writes_rows_that_have_no_generated_key()
