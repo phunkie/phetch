@@ -23,6 +23,7 @@ Requires PHP 8.2 or later with the PDO driver for your database, and phunkie/phu
 ## Quick Start
 
 ```php
+use Phunkie\Phetch\Attributes\Generated;
 use Phunkie\Phetch\Attributes\Table;
 use Phunkie\Types\Option;
 
@@ -32,7 +33,7 @@ use function Phunkie\Phetch\Functions\{connect, create, find};
 final readonly class User
 {
     public function __construct(
-        public int $id,
+        #[Generated] public int $id,
         public string $name,
         public string $email,
     ) {
@@ -56,16 +57,19 @@ A model is any class whose constructor parameters match the row. Rows are mapped
 - `#[Table('accounts', primaryKey: 'account_id')]` names the primary key. The default is `id`.
 - A parameter named `publishedYear` is fed from a `publishedYear` column if there is one, otherwise from `published_year`.
 - `#[Column('author_id')]` on a parameter maps it explicitly.
+- `#[Generated]` marks a parameter whose value the server produces, such as an auto-increment key or a timestamp. Phetch reads it like any other column; http4p's `decode` never expects it from a client.
 
 ```php
 use Phunkie\Phetch\Attributes\Column;
 use Phunkie\Phetch\Attributes\Table;
 
+use Phunkie\Phetch\Attributes\Generated;
+
 #[Table('books')]
 final readonly class Book
 {
     public function __construct(
-        public int $id,
+        #[Generated] public int $id,
         #[Column('author_id')] public int $writer,
         public string $title,
         public int $publishedYear,
@@ -74,7 +78,7 @@ final readonly class Book
 }
 ```
 
-The arrays you pass to `create` and `update` use column names.
+The arrays you pass to `create` and `update` may be keyed by column name or by constructor parameter name; a parameter name is written to its `#[Column]`, or to the snake_case form of the name.
 
 ## Connections
 
@@ -252,7 +256,7 @@ See [docs/migrations](docs/migrations/getting-started.md) for details.
 
 ## Integration with Http4p
 
-Http4p handlers return `IO<Response>`. Run the query, then compose the response in `IO`; `Option::fold` picks the response for a missing row, and `decode` with `jsonObject` turns a bad body into a `400` before the handler runs. A `routes.php` that receives the connection is all the structure an app needs:
+Http4p handlers return `IO<Response>`. Run the query, then compose the response in `IO`. `decode($req, User::class)` validates the body against the entity's constructor: on `POST` and `PUT` every parameter without a default is required except those marked `#[Generated]`, a `PATCH` may send any subset, unknown and generated fields are dropped, and a bad body is answered with a `400` listing the errors before the handler runs. `Option::fold` picks the response for a missing row. A `routes.php` that receives the connection is all the structure an app needs:
 
 ```php
 <?php
@@ -263,10 +267,9 @@ use Phunkie\Types\ImmList;
 use Phunkie\Types\Option;
 
 use function Phunkie\Http4p\Functions\decode;
-use function Phunkie\Http4p\Functions\decoding\jsonObject;
 use function Phunkie\Http4p\Functions\HttpRoutes;
 use function Phunkie\Http4p\Functions\response\{Created, NoContent, NotFound, Ok};
-use function Phunkie\Http4p\Functions\routes\{DELETE, GET, POST, PUT};
+use function Phunkie\Http4p\Functions\routes\{DELETE, GET, PATCH, POST};
 use function Phunkie\Phetch\Functions\{all, create, find, remove, update, where};
 
 return function (Connection $conn): ImmList {
@@ -283,14 +286,15 @@ return function (Connection $conn): ImmList {
         ),
 
         POST('/users', fn(Request $req) =>
-            decode($req, jsonObject('name', 'email'))->flatMap(fn(array $data) =>
-                create(User::class, $data)->run($conn)->flatMap(fn(User $user) => Created($user)))
+            decode($req, User::class)
+                ->flatMap(fn(array $data) => create(User::class, $data)->run($conn))
+                ->flatMap(fn(User $user) => Created($user))
         ),
 
-        PUT('/users/:id', fn(int $id, Request $req) =>
-            decode($req, jsonObject('name', 'email'))->flatMap(fn(array $data) =>
-                update(User::class, $id, $data)->run($conn)->flatMap(fn(Option $user) =>
-                    $user->fold($notFound($id), fn(User $updated) => Ok($updated))))
+        PATCH('/users/:id', fn(int $id, Request $req) =>
+            decode($req, User::class)
+                ->flatMap(fn(array $data) => update(User::class, $id, $data)->run($conn))
+                ->flatMap(fn(Option $user) => $user->fold($notFound($id), fn(User $updated) => Ok($updated)))
         ),
 
         DELETE('/users/:id', fn(int $id) =>
@@ -322,7 +326,7 @@ connect('sqlite:app.sqlite')
     ->unsafeRun();
 ```
 
-`ImmList`, `ImmMap`, `ImmSet` and tuples are `JsonSerializable` from phunkie 1.5, so query results go straight into the response constructors. `jsonObject` keeps only the fields you name, so request data never reaches `create` or `update` unfiltered.
+`ImmList`, `ImmMap`, `ImmSet` and tuples are `JsonSerializable` from phunkie 1.5, so query results go straight into the response constructors. The decoded array carries only the entity's own fields, so request data never reaches `create` or `update` unfiltered.
 
 ## Testing
 

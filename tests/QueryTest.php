@@ -4,6 +4,7 @@ namespace Tests;
 
 use PHPUnit\Framework\TestCase;
 use Phunkie\Phetch\Attributes\Column;
+use Phunkie\Phetch\Attributes\Generated;
 use Phunkie\Phetch\Attributes\Table;
 use Phunkie\Phetch\Connection\Connection;
 
@@ -84,6 +85,21 @@ class QueryTest extends TestCase
         $this->assertSame(7, $book->writer);
         $this->assertSame(1843, $book->publishedYear);
         $this->assertEquals($book, find(Book::class, $book->id)->run($this->conn)->unsafeRun()->get());
+    }
+
+    public function test_create_and_update_accept_constructor_parameter_names_as_keys()
+    {
+        $book = create(Book::class, ['writer' => 7, 'title' => 'Notes', 'publishedYear' => 1843])
+            ->run($this->conn)
+            ->unsafeRun();
+
+        $this->assertSame(7, $book->writer);
+        $this->assertSame(1843, $book->publishedYear);
+
+        $updated = update(Book::class, $book->id, ['writer' => 9, 'published_year' => 1844])->run($this->conn)->unsafeRun()->get();
+
+        $this->assertSame(9, $updated->writer);
+        $this->assertSame(1844, $updated->publishedYear);
     }
 
     public function test_the_primary_key_column_is_configurable()
