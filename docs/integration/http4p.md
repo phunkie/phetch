@@ -101,6 +101,42 @@ connect('sqlite:app.sqlite', statements: ['PRAGMA foreign_keys = ON'])
 - A duplicate key: `ConstraintViolation` with `Constraint::Unique`, answered `409`; a missing foreign row, a null in a required column or a failed check: `422`. A route that wants its own message adds `->recover(...)` and wins, since it runs first.
 - Anything else: `500` from the server.
 
+## Exporting rows
+
+A streamed query is a response body. Each row is fetched, encoded and flushed before the next one is fetched, whatever the size of the table:
+
+```php
+use Phunkie\Http4p\Response;
+use Phunkie\Streams\Type\Stream;
+
+GET('/books/export', fn() =>
+    all(Book::class)->stream()->run($conn)
+        ->flatMap(fn(Stream $books) => Ok($books->map(fn(Book $book) => json_encode($book) . "\n")))
+        ->map(fn(Response $response) => $response->withHeader('content-type', 'application/x-ndjson'))
+),
+```
+
+## Reading another service's export
+
+http4p's client gives a response body as a stream too, and `decodeLines` turns newline-delimited JSON into models with the rules of `decode`, generated fields included since the rows come from a store. A service that mirrors the catalogue reads the export and writes each row as it arrives:
+
+```php
+use Phunkie\Http4p\Method;
+
+use function Phunkie\Http4p\Functions\client\send;
+use function Phunkie\Http4p\Functions\decodeLines;
+use function Phunkie\Http4p\Functions\Request;
+
+send(Request(Method::GET, 'http://catalogue.internal/books/export'))
+    ->flatMap(fn(Response $response) => decodeLines($response, Book::class)
+        ->evalTap(fn(Book $book) => insert(Book::class, (array) $book)->run($conn))
+        ->compile()
+        ->drain())
+    ->unsafeRun();
+```
+
+Neither service holds more than one row at a time: the exporter fetches, encodes and flushes; the importer reads a chunk of the socket, decodes its lines and inserts them. http4p's integration suite sends 200,000 rows through this pair with both processes flat.
+
 ## Serialisation
 
 Models render as their public properties; `ImmList`, `ImmMap`, `ImmSet` and tuples are `JsonSerializable` from phunkie 1.5; http4p's encoder writes dates as ISO 8601 and backed enums by value. A value object renders as an object with its properties unless it implements `JsonSerializable`.

@@ -23,11 +23,11 @@
 
 ## Streaming
 
-- [Streaming Queries](streaming/queries.md): `stream()`, compiling, streaming HTTP bodies
+- [Streaming Queries](streaming/queries.md): `stream()`, what each driver does, compiling, streaming HTTP bodies
 
 ## Integration
 
-- [Http4p](integration/http4p.md): a JSON API in one `routes.php`, `decode` by model, `Recover`
+- [Http4p](integration/http4p.md): a JSON API in one `routes.php`, `decode` by model, `Recover`, exporting rows and reading another service's export
 
 ## Advanced
 

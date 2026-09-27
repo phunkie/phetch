@@ -92,6 +92,63 @@ class QueryBuilderTest extends TestCase
         $this->builder()->orderBy('name', 'SIDEWAYS');
     }
 
+    public function test_stream_on_mysql_leaves_the_result_set_unbuffered_while_the_statement_runs()
+    {
+        $events = [];
+        $pdo = $this->createMock(PDO::class);
+        $stmt = $this->createMock(PDOStatement::class);
+        $pdo->method('getAttribute')->willReturnCallback(fn (int $attribute) => PDO::ATTR_DRIVER_NAME === $attribute ? 'mysql' : true);
+        $pdo->method('setAttribute')->willReturnCallback(function (int $attribute, mixed $value) use (&$events) {
+            if (1000 === $attribute) {
+                $events[] = $value ? 'buffered' : 'unbuffered';
+            }
+
+            return true;
+        });
+        $pdo->method('prepare')->with('SELECT * FROM `users`')->willReturn($stmt);
+        $stmt->method('execute')->willReturnCallback(function () use (&$events) {
+            $events[] = 'execute';
+
+            return true;
+        });
+        $stmt->method('fetch')->willReturn(false);
+
+        $this->builder()->stream()->run(new Connection($pdo))->unsafeRun()->compile()->toArray();
+
+        $this->assertSame(['unbuffered', 'execute', 'buffered'], $events);
+    }
+
+    public function test_stream_on_postgresql_reads_through_a_server_side_cursor()
+    {
+        $pdo = $this->createMock(PDO::class);
+        $stmt = $this->createMock(PDOStatement::class);
+        $pdo->method('getAttribute')->with(PDO::ATTR_DRIVER_NAME)->willReturn('pgsql');
+        $pdo->expects($this->once())->method('prepare')->with('SELECT * FROM "users" WHERE "age" > ?', [PDO::ATTR_CURSOR => PDO::CURSOR_SCROLL])->willReturn($stmt);
+        $stmt->expects($this->once())->method('execute')->with([18]);
+        $stmt->method('fetch')->willReturn(false);
+
+        $this->builder()->where('age', '>', 18)->stream()->run(new Connection($pdo))->unsafeRun()->compile()->toArray();
+    }
+
+    public function test_stream_on_sqlite_prepares_a_plain_statement()
+    {
+        $prepared = [];
+        $pdo = $this->createMock(PDO::class);
+        $stmt = $this->createMock(PDOStatement::class);
+        $pdo->method('getAttribute')->with(PDO::ATTR_DRIVER_NAME)->willReturn('sqlite');
+        $pdo->method('prepare')->willReturnCallback(function (string $sql, array $options = []) use (&$prepared, $stmt) {
+            $prepared[] = [$sql, $options];
+
+            return $stmt;
+        });
+        $stmt->method('fetch')->willReturn(false);
+
+        $rows = $this->builder()->stream()->run(new Connection($pdo))->unsafeRun()->compile()->toArray();
+
+        $this->assertSame([['SELECT * FROM "users"', []]], $prepared);
+        $this->assertSame([], $rows);
+    }
+
     private function builder(): QueryBuilder
     {
         return new QueryBuilder('User', new Identifier('users'));

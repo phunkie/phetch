@@ -41,6 +41,10 @@ Keep one connection for the life of a request or a script, and pass it to `run()
 $conn->pdo()->exec('CREATE INDEX books_title ON books (title)');
 ```
 
+## Running statements
+
+`Connection::run($sql, $params)` prepares and runs a statement; `Connection::stream($sql, $params)` does the same with the driver set up not to buffer the rows, for a result set fetched one row at a time (see [Streaming](../streaming/queries.md)). The query functions go through them; they are public for raw SQL that wants the same driver handling.
+
 ## Quoting
 
 `Connection::quote(Identifier $identifier)` returns the identifier quoted for the driver: backticks on MySQL, double quotes elsewhere. Every table and column name phetch puts into SQL goes through it, after `Identifier` has checked the name against `[A-Za-z_][A-Za-z0-9_]*`. A name that fails the check throws `InvalidArgumentException` when the query is built, before any IO runs.

@@ -15,6 +15,7 @@ use Phunkie\Types\Option;
 use function None;
 use function Phunkie\Effect\Functions\io\io;
 use function Phunkie\Phetch\Functions\execute;
+use function Phunkie\Phetch\Functions\executeForStreaming;
 use function Phunkie\Phetch\Functions\hydrate;
 use function Some;
 use function StreamFromPDO;
@@ -178,13 +179,16 @@ class QueryBuilder extends Query
     }
 
     /**
+     * The matching rows as a stream, each fetched from the statement and hydrated only when the stream
+     * pulls it, with the driver set up not to buffer the result set.
+     *
      * @return Query<Stream> Stream<IO, T> wrapped in Query
      */
     public function stream(): Query
     {
         return new Query(function (Connection $conn) {
             return io(function() use ($conn) {
-                $stmt = $this->execute($conn, $this->selectSql($conn));
+                $stmt = executeForStreaming($conn, $this->selectSql($conn), $this->params());
 
                 return StreamFromPDO($stmt)->map(fn($row) => hydrate($this->model, $row));
             });

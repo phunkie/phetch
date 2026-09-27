@@ -237,11 +237,40 @@ function tableAttribute(string $class): ?Table
  */
 function execute(Connection $conn, string $sql, array $params): PDOStatement
 {
-    try {
-        $stmt = $conn->pdo()->prepare($sql);
-        $stmt->execute(array_map(fn($value) => toColumnValue($value), $params));
+    return guarded(fn() => $conn->run($sql, bound($params)));
+}
 
-        return $stmt;
+/**
+ * Prepare and run a statement whose rows are to be fetched one at a time, the driver set up not to buffer them.
+ *
+ * @throws ConstraintViolation when the database refuses the statement
+ */
+function executeForStreaming(Connection $conn, string $sql, array $params): PDOStatement
+{
+    return guarded(fn() => $conn->stream($sql, bound($params)));
+}
+
+/**
+ * The values as the driver can take them.
+ *
+ * @param list<mixed> $params
+ * @return list<mixed>
+ */
+function bound(array $params): array
+{
+    return array_map(fn($value) => toColumnValue($value), $params);
+}
+
+/**
+ * Run a statement, turning a refusal by the database into a ConstraintViolation.
+ *
+ * @param callable(): PDOStatement $statement
+ * @throws ConstraintViolation
+ */
+function guarded(callable $statement): PDOStatement
+{
+    try {
+        return $statement();
     } catch (PDOException $e) {
         throw ConstraintViolation::explains($e) ? ConstraintViolation::from($e) : $e;
     }
