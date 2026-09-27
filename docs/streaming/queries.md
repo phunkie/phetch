@@ -1,6 +1,6 @@
 # Streaming
 
-`stream()` on a builder yields the rows through a [phunkie/streams](https://github.com/phunkie/streams) `Stream`, pulling one row at a time from the statement and hydrating it as it goes, so a result set of any size is processed in constant memory.
+`stream()` on a builder yields the rows through a [phunkie/streams](https://github.com/phunkie/streams) `Stream`, fetching one row at a time from the statement and hydrating it as it goes.
 
 ```php
 $active = where(User::class, 'active', true)->stream();   // Query<Stream<User>>
@@ -25,9 +25,17 @@ $active->run($conn)->unsafeRun()
     ->unsafeRun();                                        // IO<Unit>, one effect per row
 ```
 
+## Memory
+
+Compiling collects the rows before the operations run over them, so memory grows with the result set even through `drain()`. For a bounded footprint over a large table, page by key and stream each page:
+
+```php
+where(User::class, 'id', '>', $lastId)->orderBy('id')->limit(1000)->stream();
+```
+
 ## As an HTTP body
 
-An http4p response takes a stream as its body and writes it chunk by chunk, so an export never holds the rows in memory:
+An http4p response takes a stream as its body and writes it chunk by chunk:
 
 ```php
 GET('/users/export', fn() =>
