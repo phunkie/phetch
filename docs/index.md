@@ -8,9 +8,9 @@
 ## Core
 
 - [Models](core/models.md): `#[Table]`, `#[Column]`, `#[Generated]`, hydration rules, typed columns and value objects
-- [Connections](core/connections.md): `connect`, binding a query, quoting per driver
+- [Connections](core/connections.md): `connect`, statements run on open, binding a query, quoting per driver
 - [Queries](core/queries.md): `Query` as a value, `map`, `flatMap`, `pure`, `liftIO`, `mapN`, `traverse`
-- [Errors and Transactions](core/errors-and-transactions.md): `RowNotFound`, `ConstraintViolation`, `transaction`
+- [Errors and Transactions](core/errors-and-transactions.md): `RowNotFound`, `ConstraintViolation` and which `Constraint` it broke, `transaction`
 
 ## CRUD
 

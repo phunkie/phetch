@@ -10,6 +10,7 @@ use Phunkie\Phetch\Connection\Connection;
 
 use DateTimeImmutable;
 use InvalidArgumentException;
+use Phunkie\Phetch\Constraint;
 use Phunkie\Phetch\ConstraintViolation;
 use Phunkie\Phetch\RowNotFound;
 use Phunkie\Phetch\Query;
@@ -160,6 +161,7 @@ class QueryTest extends TestCase
             $this->fail('Expected a ConstraintViolation.');
         } catch (ConstraintViolation $e) {
             $this->assertSame('UNIQUE constraint failed: members.email', $e->getMessage());
+            $this->assertSame(Constraint::Unique, $e->constraint);
         }
     }
 

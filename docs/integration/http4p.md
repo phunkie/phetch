@@ -4,7 +4,7 @@
 
 - `decode($req, Author::class)` validates the JSON body against the model's constructor: the path parameters fill the parameters of the same name, `#[Generated]` parameters are never expected, on `POST` and `PUT` every other parameter without a default is required, a `PATCH` may send any subset, value objects and enums are built from the scalars, and a bad body is answered with a `400` listing one error per field before the handler runs.
 - The response constructors take the body as their first argument, so `->flatMap(Ok(...))` answers with whatever the effect produced.
-- `Recover(SomeException::class, $handler)` middleware answers one exception class for the whole app, so `RowNotFound` and `ConstraintViolation` become `404` and `409` in two lines.
+- `Recover(SomeException::class, $handler)` middleware answers one exception class for the whole app, so `RowNotFound` becomes `404` and `ConstraintViolation` `409` or `422`, depending on the constraint, in a few lines.
 
 ## routes.php
 
@@ -16,6 +16,7 @@ A file that receives the connection and returns the application is all the struc
 use Phunkie\Http4p\Request;
 use Phunkie\Http4p\Router;
 use Phunkie\Phetch\Connection\Connection;
+use Phunkie\Phetch\Constraint;
 use Phunkie\Phetch\ConstraintViolation;
 use Phunkie\Phetch\RowNotFound;
 use Phunkie\Types\ImmList;
@@ -24,7 +25,7 @@ use Phunkie\Types\Option;
 use function Phunkie\Http4p\Functions\decode;
 use function Phunkie\Http4p\Functions\HttpRoutes;
 use function Phunkie\Http4p\Functions\middleware\{Recover, Through};
-use function Phunkie\Http4p\Functions\response\{Conflict, Created, NoContent, NotFound, Ok};
+use function Phunkie\Http4p\Functions\response\{Conflict, Created, NoContent, NotFound, Ok, UnprocessableEntity};
 use function Phunkie\Http4p\Functions\routes\{DELETE, GET, PATCH, POST};
 use function Phunkie\Phetch\Functions\{all, create, find, findOrFail, remove, update, where};
 
@@ -73,7 +74,10 @@ return fn(Connection $conn): callable => Through(
         ),
     )),
     Recover(RowNotFound::class, fn(RowNotFound $e) => NotFound(['error' => $e->getMessage()])),
-    Recover(ConstraintViolation::class, fn(ConstraintViolation $e) => Conflict(['error' => $e->getMessage()])),
+    Recover(ConstraintViolation::class, fn(ConstraintViolation $e) => match ($e->constraint) {
+        Constraint::Unique => Conflict(['error' => $e->getMessage()]),
+        default => UnprocessableEntity(['error' => $e->getMessage()]),
+    }),
 );
 ```
 
@@ -81,7 +85,7 @@ return fn(Connection $conn): callable => Through(
 // public/index.php
 $app = require dirname(__DIR__) . '/routes.php';
 
-connect('sqlite:app.sqlite')
+connect('sqlite:app.sqlite', statements: ['PRAGMA foreign_keys = ON'])
     ->flatMap(fn(Connection $conn) => (new PhpServer($app($conn)))->run())
     ->unsafeRun();
 ```
@@ -94,7 +98,7 @@ connect('sqlite:app.sqlite')
 
 - A body that does not fit: `400` from the router, before the handler.
 - `findOrFail` on a missing row: `RowNotFound`, answered `404` by the `Recover` at the bottom.
-- A duplicate key or a missing foreign row: `ConstraintViolation`, answered `409`; a route that wants its own message adds `->recover(...)` and wins, since it runs first.
+- A duplicate key: `ConstraintViolation` with `Constraint::Unique`, answered `409`; a missing foreign row, a null in a required column or a failed check: `422`. A route that wants its own message adds `->recover(...)` and wins, since it runs first.
 - Anything else: `500` from the server.
 
 ## Serialisation

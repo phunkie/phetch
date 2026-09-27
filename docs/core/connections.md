@@ -3,7 +3,7 @@
 ```php
 use function Phunkie\Phetch\Functions\connect;
 
-connect(string $dsn, ?string $username = null, ?string $password = null, array $options = []); // IO<Connection>
+connect(string $dsn, ?string $username = null, ?string $password = null, array $options = [], array $statements = []); // IO<Connection>
 ```
 
 `connect` describes opening a PDO connection; the connection is made when the `IO` runs. The `Connection` it yields wraps the PDO handle with exceptions on error and associative fetches, and remembers the driver so it can quote identifiers for it.
@@ -14,7 +14,14 @@ $conn = connect('pgsql:host=localhost;dbname=shop', 'shop', $password)->unsafeRu
 $conn = connect('sqlite::memory:')->unsafeRun();
 ```
 
-`$options` are passed to PDO as they are.
+`$options` are passed to PDO as they are. `$statements` run once the connection is open, in order, for whatever the driver needs per session:
+
+```php
+connect('sqlite:app.sqlite', statements: ['PRAGMA foreign_keys = ON']);
+connect('mysql:host=localhost;dbname=shop', 'shop', $password, statements: ["SET time_zone = '+00:00'"]);
+```
+
+SQLite enforces foreign keys only when asked, per connection, so the pragma belongs here and not in application code.
 
 ## Binding a query
 
@@ -28,10 +35,10 @@ Keep one connection for the life of a request or a script, and pass it to `run()
 
 ## Reaching PDO
 
-`Connection::pdo()` exposes the handle for anything phetch does not cover, such as raw SQL in migrations or driver pragmas:
+`Connection::pdo()` exposes the handle for anything phetch does not cover, such as raw SQL in migrations:
 
 ```php
-$conn->pdo()->exec('PRAGMA foreign_keys = ON');
+$conn->pdo()->exec('CREATE INDEX books_title ON books (title)');
 ```
 
 ## Quoting
