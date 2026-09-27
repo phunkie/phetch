@@ -15,8 +15,7 @@ final class BookshopTest extends TestCase
 
     protected function setUp(): void
     {
-        $this->conn = connect('sqlite::memory:')->unsafeRun();
-        $this->conn->pdo()->exec('PRAGMA foreign_keys = ON');
+        $this->conn = connect('sqlite::memory:', statements: ['PRAGMA foreign_keys = ON'])->unsafeRun();
 
         ob_start();
         (new Migrator(__DIR__ . '/../database/migrations'))->run()->run($this->conn)->unsafeRun();

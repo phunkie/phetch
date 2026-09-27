@@ -32,6 +32,5 @@ Identifiers are quoted for the driver behind the connection: backticks on MySQL,
 SQLite enforces foreign keys only when asked, per connection:
 
 ```php
-connect('sqlite:app.sqlite')
-    ->flatMap(fn(Connection $conn) => io(fn() => $conn->pdo()->exec('PRAGMA foreign_keys = ON'))->map(fn() => $conn));
+connect('sqlite:app.sqlite', statements: ['PRAGMA foreign_keys = ON']);
 ```

@@ -80,4 +80,4 @@ findOrFail(Author::class, $authorId)->flatMap(fn() => create(Book::class, $data)
 
 ## Foreign keys
 
-Phetch leaves referential integrity to the database. Declare the constraints in your migrations, and on SQLite enable them per connection with `PRAGMA foreign_keys = ON`. A write that breaks one fails with `ConstraintViolation`; see [Errors and Transactions](../core/errors-and-transactions.md).
+Phetch leaves referential integrity to the database. Declare the constraints in your migrations, and on SQLite enable them per connection with `connect($dsn, statements: ['PRAGMA foreign_keys = ON'])`. A write that breaks one fails with `ConstraintViolation` carrying `Constraint::ForeignKey`; see [Errors and Transactions](../core/errors-and-transactions.md).

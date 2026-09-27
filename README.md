@@ -85,10 +85,14 @@ The arrays you pass to `create` and `update` may be keyed by column name or by c
 ```php
 use function Phunkie\Phetch\Functions\connect;
 
-connect(string $dsn, ?string $username = null, ?string $password = null, array $options = []); // IO<Connection>
+connect(string $dsn, ?string $username = null, ?string $password = null, array $options = [], array $statements = []); // IO<Connection>
 ```
 
-The connection wraps a PDO handle in exception mode with associative fetches. Keep it and pass it to `run()`.
+The connection wraps a PDO handle in exception mode with associative fetches. Keep it and pass it to `run()`. The statements run once the connection is open, which is where SQLite's `PRAGMA foreign_keys = ON` belongs:
+
+```php
+connect('sqlite:app.sqlite', statements: ['PRAGMA foreign_keys = ON']);
+```
 
 ## Queries
 
@@ -142,7 +146,7 @@ where(User::class, 'active', true);                         // a builder, see be
 transaction($query);                                        // Query<A>, committed on success, rolled back when it throws
 ```
 
-A write the database refuses, a duplicate key or a missing foreign row, fails with `ConstraintViolation`, whatever the driver. Enums, dates, `Stringable` objects and value objects with a single public property are stored as scalars and rebuilt on the way back.
+A write the database refuses, a duplicate key or a missing foreign row, fails with `ConstraintViolation`, whatever the driver; its `constraint` says which kind: `Constraint::Unique`, `ForeignKey`, `NotNull`, `Check` or `Other`. Enums, dates, `Stringable` objects and value objects with a single public property are stored as scalars and rebuilt on the way back.
 
 Table and column names must be identifiers (`[A-Za-z_][A-Za-z0-9_]*`) and are quoted for the driver. Anything else, including an empty array for `update`, throws `InvalidArgumentException` when the query is built, before any IO runs. Values are always bound as prepared-statement parameters.
 
@@ -281,7 +285,7 @@ See [docs/migrations](docs/migrations/getting-started.md) for details.
 
 ## Integration with Http4p
 
-Http4p handlers return `IO<Response>`. Run the query, then compose the response in `IO`. `decode($req, User::class)` validates the body against the entity's constructor: the path parameters fill the parameters of the same name, on `POST` and `PUT` every parameter without a default is required except those marked `#[Generated]`, a `PATCH` may send any subset, and a bad body is answered with a `400` listing the errors before the handler runs. `findOrFail` and `ConstraintViolation` become `404` and `409` through http4p's `Recover` middleware, once for the whole app. The response constructors take the body as their first argument, so `->flatMap(Ok(...))` is all a handler needs to answer:
+Http4p handlers return `IO<Response>`. Run the query, then compose the response in `IO`. `decode($req, User::class)` validates the body against the entity's constructor: the path parameters fill the parameters of the same name, on `POST` and `PUT` every parameter without a default is required except those marked `#[Generated]`, a `PATCH` may send any subset, and a bad body is answered with a `400` listing the errors before the handler runs. `findOrFail` and `ConstraintViolation` become `404`, `409` or `422` through http4p's `Recover` middleware, once for the whole app. The response constructors take the body as their first argument, so `->flatMap(Ok(...))` is all a handler needs to answer:
 
 ```php
 <?php
@@ -289,13 +293,14 @@ Http4p handlers return `IO<Response>`. Run the query, then compose the response 
 use Phunkie\Http4p\Request;
 use Phunkie\Http4p\Router;
 use Phunkie\Phetch\Connection\Connection;
+use Phunkie\Phetch\Constraint;
 use Phunkie\Phetch\ConstraintViolation;
 use Phunkie\Phetch\RowNotFound;
 
 use function Phunkie\Http4p\Functions\decode;
 use function Phunkie\Http4p\Functions\HttpRoutes;
 use function Phunkie\Http4p\Functions\middleware\{Recover, Through};
-use function Phunkie\Http4p\Functions\response\{Conflict, Created, NoContent, NotFound, Ok};
+use function Phunkie\Http4p\Functions\response\{Conflict, Created, NoContent, NotFound, Ok, UnprocessableEntity};
 use function Phunkie\Http4p\Functions\routes\{DELETE, GET, PATCH, POST};
 use function Phunkie\Phetch\Functions\{all, create, findOrFail, remove, update, where};
 
@@ -333,7 +338,10 @@ return fn(Connection $conn): callable => Through(
         ),
     )),
     Recover(RowNotFound::class, fn(RowNotFound $e) => NotFound(['error' => $e->getMessage()])),
-    Recover(ConstraintViolation::class, fn(ConstraintViolation $e) => Conflict(['error' => $e->getMessage()])),
+    Recover(ConstraintViolation::class, fn(ConstraintViolation $e) => match ($e->constraint) {
+        Constraint::Unique => Conflict(['error' => $e->getMessage()]),
+        default => UnprocessableEntity(['error' => $e->getMessage()]),
+    }),
 );
 ```
 
@@ -341,7 +349,7 @@ return fn(Connection $conn): callable => Through(
 // public/index.php
 $app = require dirname(__DIR__) . '/routes.php';
 
-connect('sqlite:app.sqlite')
+connect('sqlite:app.sqlite', statements: ['PRAGMA foreign_keys = ON'])
     ->flatMap(fn(Connection $conn) => (new PhpServer($app($conn)))->run())
     ->unsafeRun();
 ```

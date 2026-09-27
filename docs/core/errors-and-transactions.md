@@ -5,7 +5,7 @@
 | Exception | When |
 |---|---|
 | `Phunkie\Phetch\RowNotFound` | `findOrFail` finds no row; the message reads `Author 9 not found` |
-| `Phunkie\Phetch\ConstraintViolation` | the database refuses a write: a duplicate key, a missing foreign row, a null in a required column. Every driver reports these under SQLSTATE class 23; the message is the driver's, without the PDO prefix, for example `UNIQUE constraint failed: authors.email` |
+| `Phunkie\Phetch\ConstraintViolation` | the database refuses a write: a duplicate key, a missing foreign row, a null in a required column, a failed check. Every driver reports these under SQLSTATE class 23; `$e->constraint` says which kind, the message is the driver's without the PDO prefix, for example `UNIQUE constraint failed: authors.email` |
 | `InvalidArgumentException` | a query is built with something it cannot accept: a name that is not an identifier, an unknown operator or order direction, an empty `update`, an `offset` without a `limit`, a `whereIn` without values, a subquery without `select` |
 | `RuntimeException` | a row lacks a column for a required constructor parameter |
 | `PDOException` | anything else PDO reports |
@@ -23,6 +23,20 @@ create(Author::class, $data)->run($conn)
 ```
 
 `attempt()` keeps the outcome as a `Validation` when the error is data rather than a failure. In an http4p application, `Recover` middleware answers a whole class of exceptions once for every route; see [Http4p Integration](../integration/http4p.md).
+
+## Which constraint
+
+`ConstraintViolation::$constraint` is a `Phunkie\Phetch\Constraint`: `Unique`, `ForeignKey`, `NotNull`, `Check` or `Other`, read from what the driver reports. PostgreSQL names the kind in the SQLSTATE, MySQL in its driver code, SQLite only in the message, and the enum hides the difference:
+
+```php
+use Phunkie\Phetch\Constraint;
+
+->recover(ConstraintViolation::class, fn(ConstraintViolation $e) => match ($e->constraint) {
+    Constraint::Unique => Conflict(['error' => 'An author with that email already exists.']),
+    Constraint::ForeignKey => UnprocessableEntity(['error' => 'The publisher does not exist.']),
+    default => UnprocessableEntity(['error' => $e->getMessage()]),
+});
+```
 
 ## Transactions
 
